@@ -40,3 +40,22 @@ def ensure_sidecar_icon() -> Path | None:
         return dest
     except OSError:
         return None
+
+
+def cleanup_stale_update_helpers() -> None:
+    """Remove leftover updater scripts from older SpecForge builds (bat/find hangs)."""
+    if not getattr(sys, "frozen", False):
+        return
+    folder = Path(sys.executable).resolve().parent
+    for name in (
+        "_specforge_update.bat",
+        "_specforge_update.cmd",
+        "_specforge_update.ps1",
+        "_specforge_update.vbs",
+    ):
+        path = folder / name
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass

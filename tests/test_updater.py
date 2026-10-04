@@ -138,8 +138,10 @@ def test_windows_replace_script_contains_settle_and_copy(tmp_path):
     assert script.suffix == ".ps1"
     body = script.read_text(encoding="utf-8")
     assert "$pidToWait = 4242" in body
+    assert "Timeout 20" in body
+    assert "Stop-Process -Name 'SpecForge'" in body
     assert "_MEI*" in body
     assert "Copy-Item" in body
-    assert "Unblock-File" in body
     assert "Start-Process" in body
-    assert "WindowStyle" not in body  # style is on the launcher, not the script body
+    assert "tasklist" not in body
+    assert ":wait_proc" not in body

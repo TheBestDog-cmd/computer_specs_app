@@ -405,6 +405,7 @@ class SpecForgeApp(ctk.CTk):
         self.geometry("1180x820")
         self.minsize(960, 700)
         self.configure(fg_color="#E8F0EC")
+        resources.cleanup_stale_update_helpers()
         resources.ensure_sidecar_icon()
         apply_window_icon(self)
 
@@ -820,8 +821,9 @@ class UpdatesDialog(ctk.CTkToplevel):
                     self._latest_info = None
                 self._done(msg)
                 if should_restart:
-                    # Give the UI a moment to show the message, then exit for the swap script.
-                    self.after(1200, self._restart_for_exe_update)
+                    # Exit ASAP so the silent updater is not stuck waiting on us.
+                    # (Older builds used a visible cmd+find loop that hung forever.)
+                    self.after(250, self._restart_for_exe_update)
 
             self.after(0, finish)
 
