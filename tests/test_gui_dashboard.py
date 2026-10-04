@@ -2,12 +2,36 @@ from specforge_desktop.collector import Snapshot
 from specforge_desktop.gui import (
     SCROLL_PAUSE_SEC,
     build_dashboard_text,
+    format_core_lines,
     format_temperature_lines,
 )
 
 
 def test_scroll_pause_is_substantial():
     assert SCROLL_PAUSE_SEC >= 0.5
+
+
+def test_format_core_lines_lists_all_small_counts():
+    lines = format_core_lines([10.0, 20.0, 30.0], expected=3)
+    assert len(lines) == 3
+    assert "Core 00" in lines[0]
+    assert "Core 02" in lines[2]
+
+
+def test_format_core_lines_compacts_high_counts():
+    cores = [float(i % 50) for i in range(32)]
+    lines = format_core_lines(cores, expected=32, dense_after=16)
+    joined = "\n".join(lines)
+    assert "32 logical" in joined
+    assert "omitted while monitoring" in joined
+    assert "Core 00" in joined
+    assert "Core 31" in joined
+    assert joined.count("Core ") < 32
+
+
+def test_format_core_lines_reports_affinity_gap():
+    lines = format_core_lines([1.0, 2.0], expected=8)
+    assert any("only 2 of 8" in line for line in lines)
 
 
 def test_format_temperature_lines_groups_all_sensors():
@@ -67,10 +91,21 @@ def test_build_dashboard_text_includes_sections():
         swap={"used": "0 B", "total": "1 GB", "percent": 0},
         disks=[{"mount": "C:\\", "used": "100 GB", "total": "500 GB", "percent": 20, "fstype": "NTFS"}],
         disk_io={"read_human_s": "1 MB/s", "write_human_s": "2 MB/s"},
-        gpu=[{"vendor": "NVIDIA", "name": "Test GPU", "cuda_available": True, "temp_c": 60.0,
-              "driver": "1", "memory_used_mb": 1, "memory_total_mb": 8,
-              "util_gpu_percent": 3, "util_mem_percent": 4, "power_draw_w": 50,
-              "power_limit_w": 100, "clock_sm_mhz": 1000, "clock_mem_mhz": 2000}],
+        gpu=[{
+            "vendor": "NVIDIA",
+            "name": "Test GPU",
+            "cuda_available": True,
+            "temp_c": 60.0,
+            "driver": "1",
+            "memory_used_mb": 1,
+            "memory_total_mb": 8,
+            "util_gpu_percent": 3,
+            "util_mem_percent": 4,
+            "power_draw_w": 50,
+            "power_limit_w": 100,
+            "clock_sm_mhz": 1000,
+            "clock_mem_mhz": 2000,
+        }],
         cuda={"toolkit_detected": False, "note": "no toolkit"},
         temperatures=[
             {"label": "CPU Package", "current_c": 55.0, "source": "test", "kind": "cpu"},
@@ -91,13 +126,13 @@ def test_build_dashboard_text_includes_sections():
         "=== GPU / CUDA ===",
         "=== Temperatures ===",
         "=== Network ===",
-        "=== PSU / Power ===",
         "=== Top processes ===",
     ):
         assert heading in text
+    assert "=== PSU / Power ===" not in text
+    assert "Power data unavailable" not in text
     assert "-- CPU --" in text
     assert "CPU Package" in text
     assert "GPU Core" in text
     assert "Core 07" in text
     assert "TestCPU" in text
-    assert "Battery" in text

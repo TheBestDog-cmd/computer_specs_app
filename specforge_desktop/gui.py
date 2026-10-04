@@ -252,16 +252,6 @@ def build_dashboard_text(snap: Snapshot) -> str:
         net_lines.append(f"{n['name']} [{n['family']}] {n['address']} ({up})")
     blocks.append("\n".join(net_lines))
 
-    power_lines = ["=== PSU / Power ==="]
-    for p in snap.power:
-        power_lines.append(f"{p.get('name')}  ({p.get('type', p.get('status', 'power'))})")
-        for key in ("status", "capacity", "voltage_v", "current_a", "power_w", "online", "detail", "manufacturer", "model_name"):
-            if key in p and p[key] not in (None, ""):
-                power_lines.append(f"  {key}: {p[key]}")
-    blocks.append(
-        "\n".join(power_lines) if len(power_lines) > 1 else "=== PSU / Power ===\nPower data unavailable"
-    )
-
     proc_lines = ["=== Top processes ===", "PID     CPU%   MEM%   NAME", "-" * 48]
     for p in snap.processes_top:
         proc_lines.append(

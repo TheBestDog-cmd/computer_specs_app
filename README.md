@@ -4,7 +4,7 @@
 
 ## Desktop app (Python GUI)
 
-Track live inventory and usage for CPU, memory, disks, network, GPU/CUDA, power, temperatures, and top processes.
+Track live inventory and usage for CPU, memory, disks, network, GPU/CUDA, temperatures, and top processes.
 
 ### Requirements
 
