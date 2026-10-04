@@ -48,7 +48,7 @@ PowerShell one-run bypass:
 powershell -ExecutionPolicy Bypass -File .\scripts\build_executable.ps1
 ```
 
-Output: `dist\SpecForge.exe` (CI also publishes `SpecForge-Setup.exe` for first-time installs)
+Output: `dist\SpecForge.exe` locally; GitHub Releases publish only `SpecForge-Setup.exe`
 
 Build with **64-bit Python** (the scripts refuse 32-bit). A 32-bit exe can under-report logical CPUs on Windows.
 
