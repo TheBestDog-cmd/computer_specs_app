@@ -109,3 +109,34 @@ def test_apply_update_refuses_when_current(monkeypatch):
         assert False, "expected RuntimeError"
     except RuntimeError as exc:
         assert "up to date" in str(exc).lower() or "newer" in str(exc).lower()
+
+
+def test_verify_downloaded_exe_rejects_tiny_or_non_pe(tmp_path):
+    bad = tmp_path / "SpecForge.exe"
+    bad.write_bytes(b"not an exe")
+    try:
+        updater.verify_downloaded_exe(bad)
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "bytes" in str(exc).lower() or "mz" in str(exc).lower()
+
+
+def test_verify_downloaded_exe_accepts_mz_and_sha(tmp_path):
+    path = tmp_path / "SpecForge.exe"
+    payload = b"MZ" + (b"\0" * 8_000_010)
+    path.write_bytes(payload)
+    digest = updater._sha256_file(path)
+    updater.verify_downloaded_exe(path, expected_sha256=digest)
+
+
+def test_windows_replace_script_contains_settle_and_copy(tmp_path):
+    exe = tmp_path / "SpecForge.exe"
+    new = tmp_path / "SpecForge.exe.new"
+    exe.write_text("old", encoding="utf-8")
+    new.write_text("new", encoding="utf-8")
+    script = updater._windows_replace_script(exe, new, "abc123")
+    body = script.read_text(encoding="utf-8")
+    assert "tasklist" in body
+    assert "copy /Y" in body
+    assert "Unblock-File" in body
+    assert "timeout /t 3" in body

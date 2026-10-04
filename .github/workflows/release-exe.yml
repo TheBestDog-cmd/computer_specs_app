@@ -37,15 +37,18 @@ jobs:
         shell: pwsh
         run: |
           $version = (Select-String -Path specforge_desktop\__init__.py -Pattern '__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $sha = (Get-FileHash -Algorithm SHA256 -Path dist\SpecForge.exe).Hash.ToLower()
           $meta = @{
             version = $version
             commit = "${{ github.sha }}"
             tag = "latest"
             repo = "${{ github.repository }}"
+            sha256 = $sha
             built_at = (Get-Date).ToUniversalTime().ToString("o")
           } | ConvertTo-Json
           Set-Content -Path dist\version.json -Value $meta -Encoding utf8
           Set-Content -Path dist\.specforge_commit -Value "${{ github.sha }}" -Encoding utf8
+          Write-Host "SpecForge.exe sha256=$sha"
 
       - name: Publish latest release
         uses: softprops/action-gh-release@v2

@@ -56,6 +56,17 @@ Build with **64-bit Python** (the scripts refuse 32-bit). A 32-bit exe can under
 
 Lower panels live in one scrollable text dashboard (not a multi-frame scroll container) so wheel/scrollbar motion stays smooth while monitoring. Live meter and dashboard redraws pause briefly while you scroll, then catch up. Per-core bars come from `psutil.cpu_percent(percpu=True)`; machines with many logical cores show a compact summary plus the first/last cores.
 
+### If update fails with “Failed to load Python DLL”
+
+That PyInstaller temp-extract error usually means the new exe launched before the old process finished cleaning up, or Windows Defender interfered with the unpack.
+
+SpecForge 1.3.5+ waits for the old process to exit, verifies the download checksum, unblocks the new file, then relaunches. If it still fails:
+
+1. Close SpecForge completely (Task Manager → end `SpecForge.exe` if needed)
+2. Delete `%TEMP%\_MEI*` folders if present
+3. Re-download `SpecForge.exe` from GitHub Releases, or run **Updates → Update now** again
+4. Optionally install the latest [Microsoft VC++ x64 redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
+
 ### Temperatures on Windows (CPU / GPU)
 
 Windows does **not** expose CPU package temperature through normal APIs (`psutil` sensors are empty there). SpecForge therefore uses several sources:

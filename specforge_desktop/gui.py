@@ -799,10 +799,18 @@ class UpdatesDialog(ctk.CTkToplevel):
         threading.Thread(target=work, daemon=True).start()
 
     def _restart_for_exe_update(self) -> None:
+        # Hard-stop so Windows releases SpecForge.exe before the swap script copies.
+        try:
+            self.master._running = False  # noqa: SLF001 - stop collector loop
+        except Exception:
+            pass
         try:
             self.master.destroy()
         except Exception:
             pass
+        import os
+
+        os._exit(0)
 
 
 def run_app() -> None:

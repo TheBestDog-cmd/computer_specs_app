@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import platform
 import shutil
@@ -67,6 +68,7 @@ class UpdateInfo:
     exe_asset_url: str | None = None
     remote_version: str | None = None
     can_update_exe: bool = False
+    exe_sha256: str | None = None
 
 
 def project_root() -> Path:
@@ -199,12 +201,16 @@ def check_for_updates(local_version: str) -> UpdateInfo:
     exe_url = None
     remote_version = None
     can_update_exe = False
+    exe_sha256 = None
     if release:
         assets = _asset_map(release)
         exe_asset = assets.get(EXE_ASSET_NAME)
         if exe_asset and exe_asset.get("browser_download_url"):
             exe_url = exe_asset["browser_download_url"]
             can_update_exe = True
+            digest = str(exe_asset.get("digest") or "")
+            if digest.lower().startswith("sha256:"):
+                exe_sha256 = digest.split(":", 1)[1].strip().lower()
         version_asset = assets.get(VERSION_ASSET_NAME)
         if version_asset and version_asset.get("browser_download_url"):
             try:
@@ -212,6 +218,8 @@ def check_for_updates(local_version: str) -> UpdateInfo:
                 remote_version = meta.get("version")
                 if meta.get("commit"):
                     remote = str(meta["commit"])[:40]
+                if meta.get("sha256"):
+                    exe_sha256 = str(meta["sha256"]).strip().lower()
             except Exception:
                 pass
 
@@ -279,6 +287,7 @@ def check_for_updates(local_version: str) -> UpdateInfo:
         exe_asset_url=exe_url,
         remote_version=remote_version,
         can_update_exe=can_update_exe and available,
+        exe_sha256=exe_sha256,
     )
 
 
@@ -358,28 +367,115 @@ def download_source_update(root: Path | None = None) -> str:
     return f"Downloaded and applied latest source from GitHub into:\n{target}"
 
 
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest().lower()
+
+
+def verify_downloaded_exe(path: Path, expected_sha256: str | None = None) -> None:
+    """Reject corrupt/HTML downloads before we try to relaunch SpecForge."""
+    if not path.exists():
+        raise RuntimeError("Downloaded SpecForge.exe is missing.")
+    size = path.stat().st_size
+    if size < 8_000_000:
+        raise RuntimeError(
+            f"Downloaded SpecForge.exe is only {size} bytes — aborting update "
+            "(likely an incomplete download or HTML error page)."
+        )
+    with open(path, "rb") as handle:
+        magic = handle.read(2)
+    if magic != b"MZ":
+        raise RuntimeError(
+            "Downloaded file is not a Windows executable (missing MZ header). "
+            "Aborting update."
+        )
+    if expected_sha256:
+        got = _sha256_file(path)
+        if got != expected_sha256.lower():
+            raise RuntimeError(
+                "Downloaded SpecForge.exe failed checksum verification.\n"
+                f"Expected sha256 {expected_sha256}\nGot {got}\n"
+                "Delete SpecForge.exe.new and try Update now again."
+            )
+
+
 def _windows_replace_script(exe_path: Path, new_path: Path, commit: str | None) -> Path:
+    """Write a robust Windows swap script.
+
+    A short wait/move race can relaunch SpecForge before the old onefile process
+    finishes _MEI cleanup, which shows up as:
+    Failed to load Python DLL ... _MEI...\\python312.dll
+    """
     script = exe_path.parent / "_specforge_update.bat"
-    commit_line = ""
-    if commit:
-        marker = exe_path.parent / ".specforge_commit"
-        commit_line = f'echo {commit}> "{marker}"\r\n'
+    log = exe_path.parent / "_specforge_update.log"
+    marker = exe_path.parent / ".specforge_commit"
+    commit_echo = f'echo {commit}> "{marker}"' if commit else "rem no commit marker"
+    unblock = (
+        'powershell -NoProfile -ExecutionPolicy Bypass -Command '
+        '"try { Unblock-File -LiteralPath $env:EXE } catch { }"'
+    )
     lines = [
         "@echo off",
-        "setlocal",
+        "setlocal EnableExtensions",
         f'set "EXE={exe_path}"',
         f'set "NEW={new_path}"',
-        ":wait",
-        "ping 127.0.0.1 -n 2 >nul",
-        'del "%EXE%" >nul 2>nul',
-        'if exist "%EXE%" goto wait',
-        'move /y "%NEW%" "%EXE%" >nul',
-        commit_line.rstrip("\r\n"),
-        'start "" "%EXE%"',
+        f'set "LOG={log}"',
+        f'set "DIR={exe_path.parent}"',
+        'echo SpecForge update started %DATE% %TIME%> "%LOG%"',
+        "rem Wait until SpecForge.exe is no longer running (file lock released).",
+        "set /a _tries=0",
+        ":wait_proc",
+        'tasklist /FI "IMAGENAME eq SpecForge.exe" | find /I "SpecForge.exe" >nul',
+        "if errorlevel 1 goto unlocked",
+        "set /a _tries+=1",
+        "if %_tries% GEQ 90 (",
+        '  echo Timed out waiting for SpecForge.exe to exit>> "%LOG%"',
+        "  goto fail",
+        ")",
+        "timeout /t 1 /nobreak >nul",
+        "goto wait_proc",
+        ":unlocked",
+        'echo Process exited; settling before file swap>> "%LOG%"',
+        "rem Extra settle time so the old onefile _MEI extract dir can finish cleanup.",
+        "timeout /t 3 /nobreak >nul",
+        ":wait_del",
+        'del /F /Q "%EXE%" >nul 2>nul',
+        'if exist "%EXE%" (',
+        "  timeout /t 1 /nobreak >nul",
+        "  goto wait_del",
+        ")",
+        'if not exist "%NEW%" (',
+        '  echo Missing downloaded file %NEW%>> "%LOG%"',
+        "  goto fail",
+        ")",
+        'echo Copying new exe into place>> "%LOG%"',
+        'copy /Y "%NEW%" "%EXE%" >> "%LOG%" 2>&1',
+        "if errorlevel 1 (",
+        '  echo copy failed>> "%LOG%"',
+        "  goto fail",
+        ")",
+        'del /F /Q "%NEW%" >nul 2>nul',
+        commit_echo,
+        "rem Clear Mark-of-the-Web so SmartScreen/Defender is less likely to gut _MEI DLLs.",
+        unblock + " >nul 2>nul",
+        "timeout /t 2 /nobreak >nul",
+        'echo Launching "%EXE%">> "%LOG%"',
+        'start "" /D "%DIR%" "%EXE%"',
         'del "%~f0" >nul 2>nul',
+        "exit /b 0",
+        ":fail",
+        'echo Update failed - see "%LOG%"',
+        "exit /b 1",
         "",
     ]
-    script.write_text("\r\n".join(line for line in lines if line is not None), encoding="utf-8")
+    script.write_text("\r\n".join(lines), encoding="utf-8")
     return script
 
 
@@ -387,6 +483,7 @@ def download_and_replace_exe(
     asset_url: str | None = None,
     remote_commit: str | None = None,
     progress: Callable[[int, int | None], None] | None = None,
+    expected_sha256: str | None = None,
 ) -> str:
     """Download SpecForge.exe from GitHub Releases and schedule a replace+restart."""
     if platform.system() != "Windows":
@@ -406,18 +503,39 @@ def download_and_replace_exe(
             )
         asset_url = info.exe_asset_url
         remote_commit = remote_commit or info.remote_commit
+        expected_sha256 = expected_sha256 or info.exe_sha256
         if not asset_url:
             raise RuntimeError(
                 "No SpecForge.exe found in the latest GitHub Release yet. "
                 "Wait for the Release workflow on main to finish, then try again."
             )
 
+    expected_sha = expected_sha256
+    if expected_sha is None or remote_commit is None:
+        try:
+            from specforge_desktop import __version__ as installed_version
+
+            probed = check_for_updates(installed_version)
+            expected_sha = expected_sha or probed.exe_sha256
+            remote_commit = remote_commit or probed.remote_commit
+        except Exception:
+            pass
+
     new_path = exe.with_suffix(exe.suffix + ".new")
     if new_path.exists():
         new_path.unlink()
     _http_download(asset_url, new_path, progress=progress)
-    if new_path.stat().st_size < 1_000_000:
-        raise RuntimeError("Downloaded exe looks too small; aborting update.")
+    # Ensure bytes are on disk before the swap script runs.
+    with open(new_path, "rb+") as handle:
+        handle.flush()
+        try:
+            import os as _os
+
+            _os.fsync(handle.fileno())
+        except OSError:
+            pass
+
+    verify_downloaded_exe(new_path, expected_sha256=expected_sha)
 
     script = _windows_replace_script(exe, new_path, remote_commit)
     # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so updater survives app exit.
@@ -430,8 +548,10 @@ def download_and_replace_exe(
     )
     return (
         "Downloaded the latest SpecForge.exe from GitHub Releases.\n"
-        "SpecForge will close and restart with the new build."
+        "SpecForge will close and restart with the new build.\n"
+        "If launch fails, see _specforge_update.log next to SpecForge.exe."
     )
+
 
 
 def apply_update(
@@ -459,6 +579,7 @@ def apply_update(
                 info.exe_asset_url,
                 info.remote_commit,
                 progress=progress,
+                expected_sha256=info.exe_sha256,
             )
             return msg, True
         raise RuntimeError(
