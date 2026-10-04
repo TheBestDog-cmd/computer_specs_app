@@ -80,9 +80,19 @@ def project_root() -> Path:
 
 
 def current_executable() -> Path | None:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve()
-    return None
+    if not getattr(sys, "frozen", False):
+        return None
+    # Prefer the canonical AppData install so updates don't rewrite a Desktop
+    # copy that Windows still shows with a stale shell icon.
+    try:
+        from specforge_desktop import resources
+
+        installed = resources.ensure_app_install() or resources.installed_exe_path()
+        if installed.exists():
+            return installed.resolve()
+    except Exception:
+        pass
+    return Path(sys.executable).resolve()
 
 
 def _subprocess_kwargs() -> dict[str, Any]:

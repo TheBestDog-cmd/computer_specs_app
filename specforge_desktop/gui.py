@@ -408,7 +408,7 @@ class SpecForgeApp(ctk.CTk):
         resources.cleanup_stale_update_helpers()
         resources.ensure_sidecar_icon()
         apply_window_icon(self)
-        # Refresh desktop shortcut icon off the UI thread (COM / PowerShell).
+        # Install to LocalAppData + refresh Desktop .lnk (fixes stale .exe icons).
         threading.Thread(target=resources.refresh_desktop_shortcut, daemon=True).start()
 
         self._build_header()
@@ -847,5 +847,10 @@ class UpdatesDialog(ctk.CTkToplevel):
 
 
 def run_app() -> None:
+    # Desktop/Downloads copies keep a sticky wrong Explorer icon. Migrate to
+    # %LOCALAPPDATA%\\SpecForge\\SpecForge.exe, relaunch from there, then exit
+    # so the new process can delete the locked Desktop leftover.
+    if resources.relaunch_from_app_install_if_needed():
+        return
     app = SpecForgeApp()
     app.mainloop()

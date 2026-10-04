@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from specforge_desktop import resources
 
 
@@ -8,7 +6,6 @@ def test_icon_assets_exist():
     assert resources.icon_png().exists()
     assert resources.icon_ico().suffix == ".ico"
     assert resources.icon_png().suffix == ".png"
-    # Classic BMP ICO (no PNG-compressed frames) for reliable Explorer icons.
     assert b"\x89PNG" not in resources.icon_ico().read_bytes()
 
 
@@ -23,8 +20,11 @@ def test_small_png_assets_exist():
     assert resources.asset_path("specforge_64.png").exists()
 
 
-def test_appdata_icon_helpers_are_callable():
-    # Non-frozen (dev) mode should no-op safely.
+def test_install_helpers_noop_when_not_frozen():
     assert resources.ensure_appdata_icon() is None
     assert resources.ensure_sidecar_icon() is None
+    assert resources.ensure_app_install() is None
     assert resources.refresh_desktop_shortcut() is None
+    assert resources.relaunch_from_app_install_if_needed() is False
+    assert resources.running_from_app_install() is False
+    assert resources.installed_exe_path().name == "SpecForge.exe"
