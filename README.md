@@ -71,6 +71,12 @@ nvidia-smi --query-gpu=name,temperature.gpu --format=csv
 
 If that fails, fix/install NVIDIA drivers before expecting GPU temp in SpecForge.
 
+
+### CPU model on Windows
+
+SpecForge reads the CPU brand from the Windows registry (`ProcessorNameString`) and WMI (`Win32_Processor.Name`).  
+It ignores useless values like `Intel64 Family 6 Model …` that `platform.processor()` often returns.
+
 ### Updates from GitHub (including exe auto-update)
 
 In SpecForge:
