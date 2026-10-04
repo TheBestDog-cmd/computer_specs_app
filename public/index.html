@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SpecForge — Computer Specs</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="atmosphere" aria-hidden="true"></div>
+    <header class="hero">
+      <p class="brand">SpecForge</p>
+      <h1>Every detail your machine is willing to share.</h1>
+      <p class="lede">Live hardware, OS, memory, disk, and network inventory from this host.</p>
+      <div class="cta-row">
+        <button id="refresh-btn" type="button">Refresh specs</button>
+        <p id="status" class="status" role="status">Loading…</p>
+      </div>
+    </header>
+
+    <main id="dashboard" class="dashboard" hidden>
+      <section class="panel" aria-labelledby="system-heading">
+        <h2 id="system-heading">System</h2>
+        <dl id="system-list"></dl>
+      </section>
+      <section class="panel" aria-labelledby="cpu-heading">
+        <h2 id="cpu-heading">CPU</h2>
+        <dl id="cpu-list"></dl>
+      </section>
+      <section class="panel" aria-labelledby="memory-heading">
+        <h2 id="memory-heading">Memory</h2>
+        <div class="meter" aria-hidden="true"><span id="memory-bar"></span></div>
+        <dl id="memory-list"></dl>
+      </section>
+      <section class="panel" aria-labelledby="disk-heading">
+        <h2 id="disk-heading">Disk</h2>
+        <div class="meter" aria-hidden="true"><span id="disk-bar"></span></div>
+        <dl id="disk-list"></dl>
+      </section>
+      <section class="panel wide" aria-labelledby="network-heading">
+        <h2 id="network-heading">Network</h2>
+        <div id="network-list" class="network-grid"></div>
+      </section>
+      <section class="panel" aria-labelledby="runtime-heading">
+        <h2 id="runtime-heading">Runtime</h2>
+        <dl id="runtime-list"></dl>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
