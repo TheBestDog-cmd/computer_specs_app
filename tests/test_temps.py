@@ -44,3 +44,15 @@ def test_collect_includes_temperature_status():
     assert "gpu_c" in snap.temperature_status
     assert "notes" in snap.temperature_status
     assert "temp_c" in snap.cpu
+
+
+def test_linux_empty_temperature_guidance_covers_cpu_and_gpu(monkeypatch):
+    monkeypatch.setattr(collector, "_nvidia_smi_path", lambda: None)
+    notes = collector._temperature_guidance(platform_name="Linux", rows=[], gpus=[])
+    joined = "\n".join(notes)
+    assert "CPU temp unavailable" in joined
+    assert "lm-sensors" in joined or "hwmon" in joined
+    assert "GPU temperature" in joined
+    assert "nvidia-smi" in joined
+    # Prefer clear per-device guidance over a single bare host note.
+    assert "No temperature sensors exposed on this host" not in joined

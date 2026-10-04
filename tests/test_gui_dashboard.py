@@ -3,6 +3,7 @@ from specforge_desktop.gui import (
     SCROLL_PAUSE_SEC,
     build_dashboard_text,
     format_core_lines,
+    format_system_lines,
     format_temperature_lines,
 )
 
@@ -32,6 +33,25 @@ def test_format_core_lines_compacts_high_counts():
 def test_format_core_lines_reports_affinity_gap():
     lines = format_core_lines([1.0, 2.0], expected=8)
     assert any("only 2 of 8" in line for line in lines)
+
+
+def test_format_system_lines():
+    snap = Snapshot(
+        collected_at=1.0,
+        system={
+            "hostname": "box",
+            "os": "Windows",
+            "release": "10",
+            "arch": "AMD64",
+            "uptime_sec": 65,
+            "python": "3.11",
+        },
+    )
+    text = "\n".join(format_system_lines(snap))
+    assert "Hostname     box" in text
+    assert "OS           Windows" in text
+    assert "1m 5s" in text
+    assert "Python       3.11" in text
 
 
 def test_format_temperature_lines_groups_all_sensors():
@@ -65,8 +85,50 @@ def test_format_temperature_lines_groups_all_sensors():
     assert "LibreHardwareMonitor" in text
 
 
-def test_build_dashboard_text_includes_sections():
+def test_format_temperature_lines_empty_state_panel_wording():
+    """Top Temperatures panel (no heading) always shows CPU/GPU + enable notes."""
     snap = Snapshot(
+        collected_at=1.0,
+        temperatures=[],
+        temperature_status={
+            "cpu_c": None,
+            "gpu_c": None,
+            "sources": [],
+            "notes": [
+                "CPU temp unavailable: install LibreHardwareMonitor.",
+                "GPU temp unavailable: install NVIDIA drivers so nvidia-smi works.",
+            ],
+        },
+    )
+    text = "\n".join(format_temperature_lines(snap, include_heading=False))
+    assert "=== Temperatures ===" not in text
+    assert "CPU temp     unavailable" in text
+    assert "GPU temp     unavailable" in text
+    assert "No live sensor readings yet." in text
+    assert "How to enable missing temps:" in text
+    assert "LibreHardwareMonitor" in text
+    assert "nvidia-smi" in text
+    # Must not be the old bare single-line empty message alone.
+    assert "No temperature sensors exposed on this host." not in text
+
+
+def test_format_temperature_lines_fallback_notes_when_status_empty():
+    snap = Snapshot(
+        collected_at=1.0,
+        temperatures=[],
+        temperature_status={"cpu_c": None, "gpu_c": None, "sources": [], "notes": []},
+    )
+    text = "\n".join(format_temperature_lines(snap, include_heading=False))
+    assert "CPU temp     unavailable" in text
+    assert "GPU temp     unavailable" in text
+    assert "No live sensor readings yet." in text
+    assert "How to enable missing temps:" in text
+    assert "LibreHardwareMonitor" in text or "lm-sensors" in text
+    assert "nvidia-smi" in text
+
+
+def _sample_snap(**overrides) -> Snapshot:
+    base = dict(
         collected_at=1.0,
         system={
             "hostname": "box",
@@ -117,7 +179,12 @@ def test_build_dashboard_text_includes_sections():
         power=[{"name": "Battery", "type": "Battery", "status": "Discharging", "capacity": 80}],
         processes_top=[{"pid": 1, "cpu_percent": 1.0, "memory_percent": 2.0, "name": "idle"}],
     )
-    text = build_dashboard_text(snap)
+    base.update(overrides)
+    return Snapshot(**base)
+
+
+def test_build_dashboard_text_includes_sections():
+    text = build_dashboard_text(_sample_snap())
     for heading in (
         "=== System ===",
         "=== CPU / Cores ===",
@@ -136,3 +203,23 @@ def test_build_dashboard_text_includes_sections():
     assert "GPU Core" in text
     assert "Core 07" in text
     assert "TestCPU" in text
+
+
+def test_build_dashboard_text_omits_top_row_panels_when_flagged():
+    """Live dashboard below System|Temperatures top row omits those sections."""
+    text = build_dashboard_text(
+        _sample_snap(),
+        include_system=False,
+        include_temperatures=False,
+    )
+    assert "=== System ===" not in text
+    assert "=== Temperatures ===" not in text
+    assert "=== CPU / Cores ===" in text
+    assert "=== Memory & Swap ===" in text
+    assert "=== Disks & I/O ===" in text
+    assert "=== GPU / CUDA ===" in text
+    assert "=== Network ===" in text
+    assert "=== Top processes ===" in text
+    assert "TestCPU" in text
+    # System hostname should not appear as a System block line, but CPU model should.
+    assert "Hostname     box" not in text

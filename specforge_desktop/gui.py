@@ -76,14 +76,31 @@ def format_core_lines(cores: list[float], expected: int | None = None, *, dense_
     return lines
 
 
-def format_temperature_lines(snap: Snapshot) -> list[str]:
-    """Format every collected temperature sensor for the Temperatures section."""
-    status = snap.temperature_status or {}
-    lines = [
-        "=== Temperatures ===",
-        f"CPU temp     {status['cpu_c']:.1f} C" if isinstance(status.get("cpu_c"), (int, float)) else "CPU temp     unavailable",
-        f"GPU temp     {status['gpu_c']:.1f} C" if isinstance(status.get("gpu_c"), (int, float)) else "GPU temp     unavailable",
+def format_system_lines(snap: Snapshot) -> list[str]:
+    sys = snap.system or {}
+    return [
+        f"Hostname     {sys.get('hostname')}",
+        f"OS           {sys.get('os')}",
+        f"Kernel       {sys.get('release')} ({sys.get('arch')})",
+        f"Uptime       {_fmt_uptime(sys.get('uptime_sec', 0))}",
+        f"Python       {sys.get('python')}",
     ]
+
+
+def format_temperature_lines(snap: Snapshot, *, include_heading: bool = True) -> list[str]:
+    """Format every collected temperature sensor for the Temperatures panel/section."""
+    status = snap.temperature_status or {}
+    cpu_ok = isinstance(status.get("cpu_c"), (int, float))
+    gpu_ok = isinstance(status.get("gpu_c"), (int, float))
+    lines: list[str] = []
+    if include_heading:
+        lines.append("=== Temperatures ===")
+    lines.extend(
+        [
+            f"CPU temp     {status['cpu_c']:.1f} C" if cpu_ok else "CPU temp     unavailable",
+            f"GPU temp     {status['gpu_c']:.1f} C" if gpu_ok else "GPU temp     unavailable",
+        ]
+    )
     sources = status.get("sources") or []
     if sources:
         lines.append(f"Sources      {', '.join(str(s) for s in sources)}")
@@ -126,9 +143,22 @@ def format_temperature_lines(snap: Snapshot) -> list[str]:
                 lines.append(f"  {label:<28} {current:5.1f} C  [{src}]{extra}")
     else:
         lines.append("")
-        lines.append("No temperature sensors reported yet.")
+        lines.append("No live sensor readings yet.")
 
-    notes = status.get("notes") or []
+    notes = [str(n).strip() for n in (status.get("notes") or []) if str(n).strip()]
+    # Always surface enablement guidance when CPU/GPU temps are missing — never leave
+    # the panel with only a bare "unavailable" line and no next step.
+    if not notes and (not cpu_ok or not gpu_ok or not rows):
+        if not cpu_ok:
+            notes.append(
+                "CPU: on Windows run LibreHardwareMonitor (Admin); on Linux install lm-sensors / check hwmon."
+            )
+        if not gpu_ok:
+            notes.append(
+                "GPU: install NVIDIA drivers so nvidia-smi works, or use amd-smi / LibreHardwareMonitor for AMD."
+            )
+        if not rows and cpu_ok and gpu_ok:
+            notes.append("Sensor list is empty even though summary temps exist; refresh or restart SpecForge.")
     if notes:
         lines.append("")
         lines.append("How to enable missing temps:")
@@ -137,23 +167,21 @@ def format_temperature_lines(snap: Snapshot) -> list[str]:
     return lines
 
 
-def build_dashboard_text(snap: Snapshot) -> str:
-    """Build the single scrollable dashboard body (pure; safe to unit-test)."""
+def build_dashboard_text(
+    snap: Snapshot,
+    *,
+    include_system: bool = True,
+    include_temperatures: bool = True,
+) -> str:
+    """Build the scrollable dashboard body (pure; safe to unit-test).
+
+    When System / Temperatures live in their own top panels, pass
+    include_system=False and include_temperatures=False so those blocks are omitted.
+    """
     blocks: list[str] = []
 
-    sys = snap.system
-    blocks.append(
-        "\n".join(
-            [
-                "=== System ===",
-                f"Hostname     {sys.get('hostname')}",
-                f"OS           {sys.get('os')}",
-                f"Kernel       {sys.get('release')} ({sys.get('arch')})",
-                f"Uptime       {_fmt_uptime(sys.get('uptime_sec', 0))}",
-                f"Python       {sys.get('python')}",
-            ]
-        )
-    )
+    if include_system:
+        blocks.append("\n".join(["=== System ===", *format_system_lines(snap)]))
 
     cores = snap.cpu.get("per_core_percent") or []
     logical = snap.cpu.get("logical_cores")
@@ -241,7 +269,8 @@ def build_dashboard_text(snap: Snapshot) -> str:
         gpu_lines.append(note)
     blocks.append("\n".join(gpu_lines))
 
-    blocks.append("\n".join(format_temperature_lines(snap)))
+    if include_temperatures:
+        blocks.append("\n".join(format_temperature_lines(snap)))
 
     net_lines = ["=== Network ==="]
     io = snap.net_io or {}
@@ -288,6 +317,42 @@ class MeterRow(ctk.CTkFrame):
         self.value.configure(text=label)
 
 
+
+class Section(ctk.CTkFrame):
+    """Small titled panel used for the System / Temperatures top row."""
+
+    def __init__(self, master, title: str, *, scrollable: bool = False, **kwargs):
+        super().__init__(master, fg_color=PANEL, corner_radius=10, border_width=1, border_color="#D5E0DB", **kwargs)
+        self._last_text = None
+        self.title = ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=15, weight="bold"), text_color=ACCENT_DEEP)
+        self.title.pack(anchor="w", padx=14, pady=(12, 4))
+        self.body = ctk.CTkTextbox(
+            self,
+            height=120,
+            activate_scrollbars=scrollable,
+            font=ctk.CTkFont(family="Consolas", size=12),
+            text_color=INK,
+            fg_color=PANEL,
+            border_width=0,
+            wrap="word",
+        )
+        self.body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.body.insert("1.0", "Loading…")
+        self.body.configure(state="disabled")
+
+    def set_height(self, px: int) -> None:
+        self.body.configure(height=px)
+
+    def set_text(self, text: str) -> None:
+        if text == self._last_text:
+            return
+        self._last_text = text
+        self.body.configure(state="normal")
+        self.body.delete("1.0", "end")
+        self.body.insert("1.0", text)
+        self.body.configure(state="disabled")
+
+
 class SpecForgeApp(ctk.CTk):
     def __init__(self, refresh_ms: int = 1000):
         super().__init__()
@@ -302,6 +367,8 @@ class SpecForgeApp(ctk.CTk):
         self._last_rendered_at: float | None = None
         self._scroll_until = 0.0
         self._last_dashboard = None
+        self._last_system = None
+        self._last_temp = None
         self._last_status = None
         self._scroll_hint_shown = False
 
@@ -336,7 +403,7 @@ class SpecForgeApp(ctk.CTk):
 
         subtitle = ctk.CTkLabel(
             header,
-            text="Live inventory and usage for CPU, memory, disks, network, GPU/CUDA, temperatures, power, and top processes.",
+            text="Live inventory and usage for CPU, memory, disks, network, GPU/CUDA, temperatures, and top processes.",
             font=ctk.CTkFont(size=13),
             text_color=MUTED,
         )
@@ -392,8 +459,20 @@ class SpecForgeApp(ctk.CTk):
         self.gpu_temp_meter.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
     def _build_body(self) -> None:
-        # One native-scrolling textbox beats CTkScrollableFrame + many nested
-        # CTk frames/textboxes: scroll no longer reflows a widget tree each tick.
+        # Top row: System | Temperatures. Everything else is pushed into the
+        # scrollable dashboard below (one native textbox keeps scrolling smooth).
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.pack(fill="x", padx=20, pady=(0, 8))
+        top.grid_columnconfigure((0, 1), weight=1, uniform="top")
+
+        self.sec_system = Section(top, "System")
+        self.sec_system.set_height(110)
+        self.sec_system.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+
+        self.sec_temp = Section(top, "Temperatures", scrollable=True)
+        self.sec_temp.set_height(160)
+        self.sec_temp.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+
         shell = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10, border_width=1, border_color="#D5E0DB")
         shell.pack(fill="both", expand=True, padx=20, pady=(0, 16))
 
@@ -427,11 +506,12 @@ class SpecForgeApp(ctk.CTk):
             self.bind_all(seq, self._mark_scroll, add="+")
 
         # CTkTextbox wraps a tk Text; bind wheel + scrollbar drag there too.
-        targets = [self.dashboard]
-        try:
-            targets.append(self.dashboard._textbox)  # noqa: SLF001 - CTk internal
-        except Exception:
-            pass
+        targets = [self.dashboard, self.sec_temp.body, self.sec_system.body]
+        for candidate in (self.dashboard, self.sec_temp.body, self.sec_system.body):
+            try:
+                targets.append(candidate._textbox)  # noqa: SLF001 - CTk internal
+            except Exception:
+                pass
         for widget in targets:
             try:
                 widget.bind("<MouseWheel>", self._mark_scroll, add="+")
@@ -546,7 +626,20 @@ class SpecForgeApp(ctk.CTk):
         self.gpu_temp_meter.update_meter(gpu_pct, gpu_label)
 
     def _render_dashboard(self, snap: Snapshot) -> None:
-        self._set_dashboard(build_dashboard_text(snap))
+        system_text = "\n".join(format_system_lines(snap))
+        if system_text != self._last_system:
+            self._last_system = system_text
+            self.sec_system.set_text(system_text)
+
+        temp_text = "\n".join(format_temperature_lines(snap, include_heading=False))
+        if temp_text != self._last_temp:
+            self._last_temp = temp_text
+            self.sec_temp.set_text(temp_text)
+
+        # System + Temperatures already occupy the top row; omit them here.
+        self._set_dashboard(
+            build_dashboard_text(snap, include_system=False, include_temperatures=False)
+        )
 
     def _open_updates(self) -> None:
         UpdatesDialog(self)
