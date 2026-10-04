@@ -405,6 +405,7 @@ class SpecForgeApp(ctk.CTk):
         self.geometry("1180x820")
         self.minsize(960, 700)
         self.configure(fg_color="#E8F0EC")
+        resources.ensure_sidecar_icon()
         apply_window_icon(self)
 
         self._build_header()
