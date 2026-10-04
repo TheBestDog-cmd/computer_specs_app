@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import time
 from datetime import datetime
@@ -10,7 +12,7 @@ import customtkinter as ctk
 
 from specforge_desktop import __version__
 from specforge_desktop.collector import SpecsCollector, Snapshot
-from specforge_desktop import updater
+from specforge_desktop import resources, updater
 
 
 ACCENT = "#0F7A6B"
@@ -24,6 +26,30 @@ WARN = "#C46B2C"
 # Pause every snapshot-driven widget update after scroll/drag so the UI thread
 # can paint wheel/scrollbar motion without competing CTk configure/layout work.
 SCROLL_PAUSE_SEC = 0.55
+
+
+def apply_window_icon(window) -> None:
+    """Set the SpecForge brand icon on a Tk/CTk window (title bar + taskbar)."""
+    import tkinter as tk
+
+    ico = resources.icon_ico()
+    png = resources.icon_png()
+    # Keep image refs on the window so Tk does not garbage-collect them.
+    kept: list = getattr(window, "_specforge_icons", [])
+    try:
+        if sys.platform.startswith("win") and ico.exists():
+            window.iconbitmap(default=str(ico))
+            window.iconbitmap(str(ico))
+    except Exception:
+        pass
+    try:
+        if png.exists():
+            image = tk.PhotoImage(master=window, file=str(png))
+            kept.append(image)
+            window.iconphoto(True, image)
+    except Exception:
+        pass
+    window._specforge_icons = kept  # noqa: SLF001 - retain refs
 
 
 def _fmt_uptime(seconds: int) -> str:
@@ -379,6 +405,7 @@ class SpecForgeApp(ctk.CTk):
         self.geometry("1180x820")
         self.minsize(960, 700)
         self.configure(fg_color="#E8F0EC")
+        apply_window_icon(self)
 
         self._build_header()
         self._build_body()
@@ -656,6 +683,7 @@ class UpdatesDialog(ctk.CTkToplevel):
         self.geometry("560x420")
         self.resizable(False, False)
         self.configure(fg_color="#E8F0EC")
+        apply_window_icon(self)
         self.transient(master)
         self.after(50, self.lift)
         self.after(80, self.focus_force)
