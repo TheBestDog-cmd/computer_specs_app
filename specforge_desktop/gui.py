@@ -12,20 +12,43 @@ import customtkinter as ctk
 
 from specforge_desktop import __version__
 from specforge_desktop.collector import SpecsCollector, Snapshot
-from specforge_desktop import resources, updater
+from specforge_desktop import preferences, resources, updater
 
 
-ACCENT = "#0F7A6B"
-ACCENT_DEEP = "#0B5348"
-INK = "#122027"
-MUTED = "#4D646E"
-PANEL = "#F4F8F6"
-TRACK = "#D7E3DE"
-WARN = "#C46B2C"
+# Module-level theme colors (updated when appearance changes).
+_THEME = preferences.theme_for(preferences.APPEARANCE_LIGHT)
+ACCENT = _THEME["accent"]
+ACCENT_DEEP = _THEME["accent_deep"]
+INK = _THEME["ink"]
+MUTED = _THEME["muted"]
+PANEL = _THEME["panel"]
+TRACK = _THEME["track"]
+WARN = _THEME["warn"]
+BORDER = _THEME["border"]
+APP_BG = _THEME["app_bg"]
+BTN_SECONDARY = _THEME["btn_secondary"]
+BTN_TERTIARY = _THEME["btn_tertiary"]
 
 # Pause every snapshot-driven widget update after scroll/drag so the UI thread
 # can paint wheel/scrollbar motion without competing CTk configure/layout work.
 SCROLL_PAUSE_SEC = 0.55
+
+
+def _sync_theme_globals(theme: dict[str, str]) -> None:
+    global ACCENT, ACCENT_DEEP, INK, MUTED, PANEL, TRACK, WARN, BORDER, APP_BG
+    global BTN_SECONDARY, BTN_TERTIARY, _THEME
+    _THEME = dict(theme)
+    ACCENT = theme["accent"]
+    ACCENT_DEEP = theme["accent_deep"]
+    INK = theme["ink"]
+    MUTED = theme["muted"]
+    PANEL = theme["panel"]
+    TRACK = theme["track"]
+    WARN = theme["warn"]
+    BORDER = theme["border"]
+    APP_BG = theme["app_bg"]
+    BTN_SECONDARY = theme["btn_secondary"]
+    BTN_TERTIARY = theme["btn_tertiary"]
 
 
 def apply_window_icon(window) -> None:
@@ -331,6 +354,12 @@ class MeterRow(ctk.CTkFrame):
         self.bar.grid(row=1, column=1, sticky="ew")
         self.bar.set(0)
 
+    def apply_theme(self) -> None:
+        self.title.configure(text_color=ACCENT_DEEP)
+        self.value.configure(text_color=MUTED)
+        pct = self._last_pct if self._last_pct is not None else 0.0
+        self.bar.configure(fg_color=TRACK, progress_color=WARN if pct >= 85 else ACCENT)
+
     def update_meter(self, percent: float | None, label: str) -> None:
         pct = 0.0 if percent is None else max(0.0, min(float(percent), 100.0))
         # Avoid redundant widget updates (major source of scroll jank).
@@ -348,7 +377,7 @@ class Section(ctk.CTkFrame):
     """Small titled panel used for the System / Temperatures top row."""
 
     def __init__(self, master, title: str, *, scrollable: bool = False, **kwargs):
-        super().__init__(master, fg_color=PANEL, corner_radius=10, border_width=1, border_color="#D5E0DB", **kwargs)
+        super().__init__(master, fg_color=PANEL, corner_radius=10, border_width=1, border_color=BORDER, **kwargs)
         self._last_text = None
         self.title = ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=15, weight="bold"), text_color=ACCENT_DEEP)
         self.title.pack(anchor="w", padx=14, pady=(12, 4))
@@ -365,6 +394,11 @@ class Section(ctk.CTkFrame):
         self.body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.body.insert("1.0", "Loading…")
         self.body.configure(state="disabled")
+
+    def apply_theme(self) -> None:
+        self.configure(fg_color=PANEL, border_color=BORDER)
+        self.title.configure(text_color=ACCENT_DEEP)
+        self.body.configure(text_color=INK, fg_color=PANEL)
 
     def set_height(self, px: int) -> None:
         self.body.configure(height=px)
@@ -397,14 +431,16 @@ class SpecForgeApp(ctk.CTk):
         self._last_temp = None
         self._last_status = None
         self._scroll_hint_shown = False
+        self._appearance = preferences.get_appearance()
+        _sync_theme_globals(preferences.theme_for(self._appearance))
 
-        ctk.set_appearance_mode("light")
+        ctk.set_appearance_mode(self._appearance)
         ctk.set_default_color_theme("green")
 
         self.title("SpecForge — Real-time Computer Specs")
         self.geometry("1180x820")
         self.minsize(960, 700)
-        self.configure(fg_color="#E8F0EC")
+        self.configure(fg_color=APP_BG)
         resources.cleanup_stale_update_helpers()
         resources.ensure_sidecar_icon()
         apply_window_icon(self)
@@ -424,21 +460,21 @@ class SpecForgeApp(ctk.CTk):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=20, pady=(18, 8))
 
-        brand = ctk.CTkLabel(
+        self.brand = ctk.CTkLabel(
             header,
             text="SpecForge",
             font=ctk.CTkFont(size=34, weight="bold"),
             text_color=ACCENT_DEEP,
         )
-        brand.pack(anchor="w")
+        self.brand.pack(anchor="w")
 
-        subtitle = ctk.CTkLabel(
+        self.subtitle = ctk.CTkLabel(
             header,
             text="Live inventory and usage for CPU, memory, disks, network, GPU/CUDA, temperatures, and top processes.",
             font=ctk.CTkFont(size=13),
             text_color=MUTED,
         )
-        subtitle.pack(anchor="w", pady=(2, 10))
+        self.subtitle.pack(anchor="w", pady=(2, 10))
 
         controls = ctk.CTkFrame(header, fg_color="transparent")
         controls.pack(fill="x")
@@ -448,7 +484,7 @@ class SpecForgeApp(ctk.CTk):
             text="Pause",
             width=110,
             fg_color=ACCENT,
-            hover_color=ACCENT_DEEP,
+            hover_color=ACCENT_DEEP if self._appearance == "light" else ACCENT,
             command=self._toggle_pause,
         )
         self.pause_btn.pack(side="left")
@@ -457,18 +493,28 @@ class SpecForgeApp(ctk.CTk):
             controls,
             text="Updates",
             width=110,
-            fg_color="#2F5D62",
-            hover_color=ACCENT_DEEP,
+            fg_color=BTN_SECONDARY,
+            hover_color=ACCENT_DEEP if self._appearance == "light" else ACCENT,
             command=self._open_updates,
         )
         self.updates_btn.pack(side="left", padx=(10, 0))
+
+        self.prefs_btn = ctk.CTkButton(
+            controls,
+            text="Preferences",
+            width=120,
+            fg_color=BTN_TERTIARY,
+            hover_color=ACCENT_DEEP if self._appearance == "light" else ACCENT,
+            command=self._open_preferences,
+        )
+        self.prefs_btn.pack(side="left", padx=(10, 0))
 
         self.web_btn = ctk.CTkButton(
             controls,
             text="GitHub",
             width=90,
-            fg_color="#3D6B74",
-            hover_color=ACCENT_DEEP,
+            fg_color=BTN_TERTIARY,
+            hover_color=ACCENT_DEEP if self._appearance == "light" else ACCENT,
             command=lambda: updater.open_github(),
         )
         self.web_btn.pack(side="left", padx=(10, 0))
@@ -504,16 +550,17 @@ class SpecForgeApp(ctk.CTk):
         self.sec_temp.set_height(160)
         self.sec_temp.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
-        shell = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10, border_width=1, border_color="#D5E0DB")
+        shell = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10, border_width=1, border_color=BORDER)
         shell.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+        self._dashboard_shell = shell
 
-        title = ctk.CTkLabel(
+        self.dashboard_title = ctk.CTkLabel(
             shell,
             text="Live dashboard",
             font=ctk.CTkFont(size=15, weight="bold"),
             text_color=ACCENT_DEEP,
         )
-        title.pack(anchor="w", padx=14, pady=(12, 4))
+        self.dashboard_title.pack(anchor="w", padx=14, pady=(12, 4))
 
         self.dashboard = ctk.CTkTextbox(
             shell,
@@ -675,6 +722,43 @@ class SpecForgeApp(ctk.CTk):
     def _open_updates(self) -> None:
         UpdatesDialog(self)
 
+    def _open_preferences(self) -> None:
+        PreferencesDialog(self)
+
+    def set_appearance(self, mode: str) -> None:
+        """Apply and persist light/dark appearance across the main window."""
+        normalized = preferences.set_appearance(mode)
+        self._appearance = normalized
+        _sync_theme_globals(preferences.theme_for(normalized))
+        ctk.set_appearance_mode(normalized)
+        self._apply_theme_to_widgets()
+
+    def _hover(self) -> str:
+        return ACCENT_DEEP if self._appearance == preferences.APPEARANCE_LIGHT else ACCENT
+
+    def _apply_theme_to_widgets(self) -> None:
+        self.configure(fg_color=APP_BG)
+        self.brand.configure(text_color=ACCENT_DEEP)
+        self.subtitle.configure(text_color=MUTED)
+        self.status.configure(text_color=MUTED)
+        hover = self._hover()
+        self.pause_btn.configure(fg_color=ACCENT, hover_color=hover)
+        self.updates_btn.configure(fg_color=BTN_SECONDARY, hover_color=hover)
+        self.prefs_btn.configure(fg_color=BTN_TERTIARY, hover_color=hover)
+        self.web_btn.configure(fg_color=BTN_TERTIARY, hover_color=hover)
+        for meter in (
+            self.cpu_meter,
+            self.mem_meter,
+            self.cpu_temp_meter,
+            self.gpu_temp_meter,
+        ):
+            meter.apply_theme()
+        self.sec_system.apply_theme()
+        self.sec_temp.apply_theme()
+        self._dashboard_shell.configure(fg_color=PANEL, border_color=BORDER)
+        self.dashboard_title.configure(text_color=ACCENT_DEEP)
+        self.dashboard.configure(text_color=INK, fg_color=PANEL)
+
     def _on_close(self) -> None:
         self._running = False
         self.destroy()
@@ -686,7 +770,7 @@ class UpdatesDialog(ctk.CTkToplevel):
         self.title("SpecForge Updates")
         self.geometry("560x420")
         self.resizable(False, False)
-        self.configure(fg_color="#E8F0EC")
+        self.configure(fg_color=APP_BG)
         apply_window_icon(self)
         self.transient(master)
         self.after(50, self.lift)
@@ -716,14 +800,15 @@ class UpdatesDialog(ctk.CTkToplevel):
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(fill="x", padx=20, pady=(0, 18))
 
-        self.check_btn = ctk.CTkButton(row, text="Check", width=100, fg_color=ACCENT, hover_color=ACCENT_DEEP, command=self._check)
+        hover = ACCENT_DEEP if preferences.get_appearance() == "light" else ACCENT
+        self.check_btn = ctk.CTkButton(row, text="Check", width=100, fg_color=ACCENT, hover_color=hover, command=self._check)
         self.check_btn.pack(side="left")
-        self.pull_btn = ctk.CTkButton(row, text="Update now", width=120, fg_color="#2F5D62", hover_color=ACCENT_DEEP, command=self._pull)
+        self.pull_btn = ctk.CTkButton(row, text="Update now", width=120, fg_color=BTN_SECONDARY, hover_color=hover, command=self._pull)
         self.pull_btn.pack(side="left", padx=8)
         self.pull_btn.configure(state="disabled")
-        self.web_btn = ctk.CTkButton(row, text="Open GitHub", width=120, fg_color="#3D6B74", hover_color=ACCENT_DEEP, command=lambda: updater.open_github())
+        self.web_btn = ctk.CTkButton(row, text="Open GitHub", width=120, fg_color=BTN_TERTIARY, hover_color=hover, command=lambda: updater.open_github())
         self.web_btn.pack(side="left")
-        self.releases_btn = ctk.CTkButton(row, text="Releases", width=100, fg_color="#3D6B74", hover_color=ACCENT_DEEP, command=updater.open_releases)
+        self.releases_btn = ctk.CTkButton(row, text="Releases", width=100, fg_color=BTN_TERTIARY, hover_color=hover, command=updater.open_releases)
         self.releases_btn.pack(side="left", padx=8)
 
         self._latest_info: updater.UpdateInfo | None = None
@@ -847,6 +932,99 @@ class UpdatesDialog(ctk.CTkToplevel):
         import os
 
         os._exit(0)
+
+
+class PreferencesDialog(ctk.CTkToplevel):
+    def __init__(self, master: SpecForgeApp):
+        super().__init__(master)
+        self.master_app = master
+        self.title("SpecForge Preferences")
+        self.geometry("480x280")
+        self.resizable(False, False)
+        self.configure(fg_color=APP_BG)
+        apply_window_icon(self)
+        self.transient(master)
+        self.after(50, self.lift)
+        self.after(80, self.focus_force)
+
+        ctk.CTkLabel(
+            self,
+            text="Preferences",
+            font=ctk.CTkFont(size=22, weight="bold"),
+            text_color=ACCENT_DEEP,
+        ).pack(anchor="w", padx=20, pady=(18, 4))
+
+        ctk.CTkLabel(
+            self,
+            text="Appearance settings are saved on this PC and applied the next time SpecForge starts.",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+            wraplength=440,
+            justify="left",
+        ).pack(anchor="w", padx=20, pady=(0, 16))
+
+        panel = ctk.CTkFrame(
+            self,
+            fg_color=PANEL,
+            corner_radius=10,
+            border_width=1,
+            border_color=BORDER,
+        )
+        panel.pack(fill="x", padx=20, pady=(0, 18))
+
+        row = ctk.CTkFrame(panel, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=16)
+
+        texts = ctk.CTkFrame(row, fg_color="transparent")
+        texts.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            texts,
+            text="Dark mode",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=ACCENT_DEEP,
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            texts,
+            text="Use a darker palette for the dashboard and dialogs.",
+            font=ctk.CTkFont(size=12),
+            text_color=MUTED,
+        ).pack(anchor="w", pady=(2, 0))
+
+        dark = master._appearance == preferences.APPEARANCE_DARK
+        self.dark_switch = ctk.CTkSwitch(
+            row,
+            text="",
+            width=48,
+            command=self._toggle_dark,
+            progress_color=ACCENT,
+            button_color="#FFFFFF",
+            button_hover_color="#F0F0F0",
+        )
+        self.dark_switch.pack(side="right", padx=(12, 0))
+        if dark:
+            self.dark_switch.select()
+        else:
+            self.dark_switch.deselect()
+
+        ctk.CTkButton(
+            self,
+            text="Close",
+            width=100,
+            fg_color=BTN_SECONDARY,
+            hover_color=ACCENT if master._appearance == preferences.APPEARANCE_DARK else ACCENT_DEEP,
+            command=self.destroy,
+        ).pack(anchor="e", padx=20, pady=(0, 18))
+
+    def _toggle_dark(self) -> None:
+        mode = (
+            preferences.APPEARANCE_DARK
+            if self.dark_switch.get()
+            else preferences.APPEARANCE_LIGHT
+        )
+        app = self.master_app
+        app.set_appearance(mode)
+        self.destroy()
+        PreferencesDialog(app)
 
 
 def run_app() -> None:

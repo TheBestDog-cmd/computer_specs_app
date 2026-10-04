@@ -1,3 +1,3 @@
 """SpecForge desktop — real-time computer specs monitor."""
 
-__version__ = "1.3.16"
+__version__ = "1.3.17"
