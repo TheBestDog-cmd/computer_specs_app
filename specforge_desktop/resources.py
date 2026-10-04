@@ -11,6 +11,14 @@ from pathlib import Path
 
 from specforge_desktop import __version__
 
+# Loose copies left in Desktop/Downloads after the user runs the installer.
+_LOOSE_EXE_NAMES = (
+    "SpecForge.exe",
+    "SpecForge-Setup.exe",
+    "SpecForge_Setup.exe",
+    "SpecForgeInstaller.exe",
+)
+
 
 def project_root() -> Path:
     if getattr(sys, "frozen", False):
@@ -44,24 +52,41 @@ def _desktop_dir() -> Path | None:
     return public if public.is_dir() else None
 
 
-def _appdata_dir() -> Path:
+def _downloads_dir() -> Path | None:
+    downloads = Path(os.environ.get("USERPROFILE", "")) / "Downloads"
+    return downloads if downloads.is_dir() else None
+
+
+def _programs_root() -> Path:
+    """Per-user Programs folder (no admin elevation required)."""
+    base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    return base / "Programs"
+
+
+def _install_dir() -> Path:
+    """Canonical install folder: %LOCALAPPDATA%\\Programs\\SpecForge\\."""
+    return _programs_root() / "SpecForge"
+
+
+def _legacy_appdata_dir() -> Path:
+    """Pre-1.3.13 location (%LOCALAPPDATA%\\SpecForge)."""
     base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
     return base / "SpecForge"
 
 
 def installed_exe_path() -> Path:
-    """Canonical install location — avoids Desktop path icon-cache ghosts."""
-    return _appdata_dir() / "SpecForge.exe"
+    """Installed app path — SpecForge.exe under the Programs\\SpecForge folder."""
+    return _install_dir() / "SpecForge.exe"
 
 
 def ensure_appdata_icon() -> Path | None:
-    """Install a versioned .ico under LocalAppData (not on the Desktop)."""
+    """Install a versioned .ico next to the installed exe (not on the Desktop)."""
     if not getattr(sys, "frozen", False):
         return None
     src = icon_ico()
     if not src.exists():
         return None
-    dest_dir = _appdata_dir()
+    dest_dir = _install_dir()
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"SpecForge-{__version__}.ico"
@@ -100,12 +125,19 @@ def notify_shell_of_exe(path: Path) -> None:
         pass
 
 
-def ensure_app_install() -> Path | None:
-    """Copy the running exe into %LOCALAPPDATA%\\SpecForge\\SpecForge.exe.
+def _copy_exe(src: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".exe.installing")
+    shutil.copy2(src, tmp)
+    tmp.replace(dest)
 
-    Desktop/Downloads copies keep a sticky wrong icon in the shell cache after
-    in-place updates. A stable AppData path + Desktop .lnk shows the brand
-    icon on the shortcut and on the real exe in Explorer.
+
+def ensure_app_install() -> Path | None:
+    """Install the running exe as %LOCALAPPDATA%\\Programs\\SpecForge\\SpecForge.exe.
+
+    Direct downloads (SpecForge-Setup.exe from GitHub Releases, or a loose
+    Desktop/Downloads copy) are treated as an installer: they copy into the
+    Programs folder, then the Desktop shortcut points at that install.
     """
     if not getattr(sys, "frozen", False) or not sys.platform.startswith("win"):
         return None
@@ -113,7 +145,6 @@ def ensure_app_install() -> Path | None:
     src = Path(sys.executable).resolve()
     dest = installed_exe_path()
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
         if src.resolve() != dest.resolve():
             need_copy = True
             if dest.exists():
@@ -122,10 +153,12 @@ def ensure_app_install() -> Path | None:
                 except OSError:
                     need_copy = True
             if need_copy or not dest.exists():
-                # Running onefile can still be read/copied on Windows.
-                tmp = dest.with_suffix(".exe.installing")
-                shutil.copy2(src, tmp)
-                tmp.replace(dest)
+                _copy_exe(src, dest)
+        elif not dest.exists():
+            # Migrate from the older %LOCALAPPDATA%\\SpecForge layout if present.
+            legacy = _legacy_appdata_dir() / "SpecForge.exe"
+            if legacy.exists():
+                _copy_exe(legacy, dest)
 
         ensure_appdata_icon()
         notify_shell_of_exe(dest)
@@ -135,7 +168,7 @@ def ensure_app_install() -> Path | None:
 
 
 def running_from_app_install() -> bool:
-    """True when this frozen process is the canonical AppData SpecForge.exe."""
+    """True when this frozen process is the canonical Programs\\SpecForge.exe."""
     if not getattr(sys, "frozen", False):
         return False
     try:
@@ -144,11 +177,21 @@ def running_from_app_install() -> bool:
         return False
 
 
-def relaunch_from_app_install_if_needed() -> bool:
-    """If started outside AppData, install there, start that copy, and exit.
+def is_setup_executable(path: Path | None = None) -> bool:
+    """True when the exe looks like a downloaded installer (Setup / Installer)."""
+    exe = path or (Path(sys.executable) if getattr(sys, "frozen", False) else None)
+    if exe is None:
+        return False
+    name = exe.name.lower()
+    return "setup" in name or "install" in name
 
-    Returns True when the caller should terminate this process. That lets the
-    new AppData instance delete a locked Desktop SpecForge.exe leftover.
+
+def relaunch_from_app_install_if_needed() -> bool:
+    """If started outside Programs\\SpecForge, install there, start it, and exit.
+
+    This is the installer path for SpecForge-Setup.exe (and other loose copies).
+    Returns True when the caller should terminate this process so leftovers can
+    be deleted after the file lock is released.
     """
     if not getattr(sys, "frozen", False) or not sys.platform.startswith("win"):
         return False
@@ -159,7 +202,7 @@ def relaunch_from_app_install_if_needed() -> bool:
     if not dest or not dest.exists():
         return False
 
-    # Point the Desktop shortcut at AppData before we exit the Desktop copy.
+    # Point the Desktop shortcut at the Programs install before we exit.
     try:
         refresh_desktop_shortcut()
     except Exception:
@@ -184,44 +227,55 @@ def relaunch_from_app_install_if_needed() -> bool:
         return False
 
 
-def _remove_loose_desktop_artifacts(installed: Path | None) -> None:
-    """Remove Desktop SpecForge.ico / leftover Desktop SpecForge.exe after migrate."""
-    desktop = _desktop_dir()
-    if not desktop:
-        return
-    for name in ("SpecForge.ico",):
-        path = desktop / name
+def _unlink_with_retry(path: Path, attempts: int = 8, delay: float = 0.35) -> None:
+    for _ in range(attempts):
         try:
-            if path.exists() and path.is_file():
+            if path.exists():
                 path.unlink()
+            return
         except OSError:
-            pass
+            time.sleep(delay)
 
-    # If we successfully installed to AppData, remove the Desktop .exe copy so
-    # the user isn't looking at a cache-stale file next to the good shortcut.
-    if installed and installed.exists():
-        desktop_exe = desktop / "SpecForge.exe"
-        try:
-            if (
-                desktop_exe.exists()
-                and desktop_exe.resolve() != installed.resolve()
-            ):
-                # Parent Desktop process may have just exited — retry briefly.
-                for _ in range(8):
-                    try:
-                        desktop_exe.unlink()
-                        break
-                    except OSError:
-                        time.sleep(0.35)
-        except OSError:
-            pass
+
+def _remove_loose_install_artifacts(installed: Path | None) -> None:
+    """Remove Desktop/Downloads installer leftovers after a Programs install."""
+    if not installed or not installed.exists():
+        return
+    installed_resolved = installed.resolve()
+
+    for folder in (_desktop_dir(), _downloads_dir()):
+        if not folder:
+            continue
+        for name in ("SpecForge.ico", *_LOOSE_EXE_NAMES):
+            path = folder / name
+            try:
+                if not path.exists() or not path.is_file():
+                    continue
+                if path.resolve() == installed_resolved:
+                    continue
+                _unlink_with_retry(path)
+            except OSError:
+                pass
+
+    # Drop the pre-1.3.13 AppData\\SpecForge.exe once Programs install exists.
+    legacy_exe = _legacy_appdata_dir() / "SpecForge.exe"
+    try:
+        if legacy_exe.exists() and legacy_exe.resolve() != installed_resolved:
+            _unlink_with_retry(legacy_exe)
+    except OSError:
+        pass
 
 
 def cleanup_stale_update_helpers() -> None:
     """Remove leftover updater scripts from older SpecForge builds."""
     if not getattr(sys, "frozen", False):
         return
-    for folder in {Path(sys.executable).resolve().parent, _appdata_dir()}:
+    folders = {
+        Path(sys.executable).resolve().parent,
+        _install_dir(),
+        _legacy_appdata_dir(),
+    }
+    for folder in folders:
         for name in (
             "_specforge_update.bat",
             "_specforge_update.cmd",
@@ -237,12 +291,12 @@ def cleanup_stale_update_helpers() -> None:
 
 
 def refresh_desktop_shortcut() -> Path | None:
-    """Create/update Desktop\\SpecForge.lnk -> AppData exe + AppData .ico."""
+    """Create/update Desktop\\SpecForge.lnk -> Programs\\SpecForge\\SpecForge.exe."""
     if not getattr(sys, "frozen", False) or not sys.platform.startswith("win"):
         return None
 
     installed = ensure_app_install()
-    _remove_loose_desktop_artifacts(installed)
+    _remove_loose_install_artifacts(installed)
     exe = installed or Path(sys.executable).resolve()
     ico = ensure_appdata_icon()
     desktop = _desktop_dir()
@@ -250,8 +304,8 @@ def refresh_desktop_shortcut() -> Path | None:
         return None
 
     lnk = desktop / "SpecForge.lnk"
-    # Prefer the .exe itself as IconLocation now that it lives on a fresh AppData
-    # path (shell cache no longer stuck on an old Desktop path). Fall back to .ico.
+    # Prefer the installed .exe as IconLocation (fresh Programs path avoids
+    # Desktop shell-cache ghosts). Fall back to the sidecar .ico.
     icon_loc = f"{exe},0" if exe.exists() else (f"{ico},0" if ico else "")
 
     def _q(value: str) -> str:

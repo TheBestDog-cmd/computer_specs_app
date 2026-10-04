@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from specforge_desktop import resources
 
 
@@ -27,4 +29,13 @@ def test_install_helpers_noop_when_not_frozen():
     assert resources.refresh_desktop_shortcut() is None
     assert resources.relaunch_from_app_install_if_needed() is False
     assert resources.running_from_app_install() is False
-    assert resources.installed_exe_path().name == "SpecForge.exe"
+    assert resources.is_setup_executable() is False
+    installed = resources.installed_exe_path()
+    assert installed.name == "SpecForge.exe"
+    assert installed.parent.name == "SpecForge"
+    assert installed.parent.parent.name == "Programs"
+
+
+def test_is_setup_executable_name():
+    assert resources.is_setup_executable(Path("SpecForge-Setup.exe")) is True
+    assert resources.is_setup_executable(Path("SpecForge.exe")) is False

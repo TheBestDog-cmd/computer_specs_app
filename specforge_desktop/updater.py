@@ -26,7 +26,8 @@ API_COMMIT = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/commits
 API_RELEASE = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 ZIPBALL_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
 USER_AGENT = "SpecForge-Updater/1.3"
-EXE_ASSET_NAME = "SpecForge.exe"
+EXE_ASSET_NAME = "SpecForge-Setup.exe"
+EXE_ASSET_FALLBACK = "SpecForge.exe"
 VERSION_ASSET_NAME = "version.json"
 # Release CDN URLs — not api.github.com (avoids unauthenticated 60/hr API quota).
 RELEASE_VERSION_URL = (
@@ -36,6 +37,10 @@ RELEASE_VERSION_URL = (
 RELEASE_EXE_URL = (
     f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/latest/"
     f"{EXE_ASSET_NAME}"
+)
+RELEASE_EXE_FALLBACK_URL = (
+    f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/latest/"
+    f"{EXE_ASSET_FALLBACK}"
 )
 RELEASES_PAGE_URL = f"{REPO_URL}/releases/latest"
 
@@ -127,7 +132,7 @@ def _friendly_http_error(exc: urllib.error.HTTPError) -> str:
     if exc.code == 403 and "rate limit" in reason.lower():
         return (
             "GitHub API rate limit exceeded.\n"
-            f"Download SpecForge.exe from {RELEASES_PAGE_URL}, or try Check again later."
+            f"Download SpecForge-Setup.exe from {RELEASES_PAGE_URL}, or try Check again later."
         )
     if exc.code == 403:
         return (
@@ -298,7 +303,7 @@ def check_for_updates(local_version: str) -> UpdateInfo:
                 release_tag = release.get("tag_name") or release_tag
                 release_url = release.get("html_url") or release_url
                 assets = _asset_map(release)
-                exe_asset = assets.get(EXE_ASSET_NAME)
+                exe_asset = assets.get(EXE_ASSET_NAME) or assets.get(EXE_ASSET_FALLBACK)
                 if exe_asset and exe_asset.get("browser_download_url"):
                     exe_url = exe_asset["browser_download_url"]
                     can_update_exe = True
@@ -353,11 +358,11 @@ def check_for_updates(local_version: str) -> UpdateInfo:
                 "a newer version. Wait for CI to publish, then Check again."
             )
         if available and can_update_exe:
-            detail += " Update now will download SpecForge.exe and replace this app on restart."
+            detail += " Update now will download SpecForge-Setup.exe and replace this app on restart."
         elif available and not can_update_exe:
             available = False
             detail = (
-                f"Version {remote_version} is listed, but SpecForge.exe is not in the latest "
+                f"Version {remote_version} is listed, but SpecForge-Setup.exe is not in the latest "
                 "release assets yet (CI may still be publishing)."
             )
         elif can_update_exe and not available:
@@ -719,7 +724,7 @@ def download_and_replace_exe(
         expected_sha256 = expected_sha256 or info.exe_sha256
         if not asset_url:
             raise RuntimeError(
-                "No SpecForge.exe found in the latest GitHub Release yet. "
+                "No SpecForge-Setup.exe found in the latest GitHub Release yet. "
                 "Wait for the Release workflow on main to finish, then try again."
             )
 
@@ -751,7 +756,7 @@ def download_and_replace_exe(
     script = _windows_update_ps1(exe, new_path, remote_commit, os.getpid())
     _launch_silent_updater(script, exe.parent)
     return (
-        "Downloaded the latest SpecForge.exe from GitHub Releases.\n"
+        "Downloaded the latest SpecForge build from GitHub Releases.\n"
         "SpecForge will close and restart quietly with the new build "
         "(no terminal windows).\n"
         "If launch fails, see _specforge_update.log next to SpecForge.exe, "
@@ -789,7 +794,7 @@ def apply_update(
             )
             return msg, True
         raise RuntimeError(
-            "A newer version is listed, but SpecForge.exe is not downloadable yet. "
+            "A newer version is listed, but SpecForge-Setup.exe is not downloadable yet. "
             "Wait for the GitHub Release workflow, then try again."
         )
     if mode == "git":

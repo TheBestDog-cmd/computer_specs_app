@@ -39,6 +39,9 @@ if not exist "dist\SpecForge.exe" (
   exit /b 1
 )
 
+copy /Y "dist\SpecForge.exe" "dist\SpecForge-Setup.exe" >nul
+
 echo.
 echo Build succeeded: %CD%\dist\SpecForge.exe
-echo Double-click that file to run SpecForge.
+echo Installer copy:  %CD%\dist\SpecForge-Setup.exe
+echo Run SpecForge-Setup.exe once to install under %%LOCALAPPDATA%%\Programs\SpecForge.

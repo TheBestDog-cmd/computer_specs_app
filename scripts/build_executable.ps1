@@ -39,9 +39,12 @@ pyinstaller --noconfirm --clean --onefile --noconsole --name SpecForge `
 
 $exe = Join-Path (Get-Location) "dist\SpecForge.exe"
 if (Test-Path $exe) {
+    $setup = Join-Path (Get-Location) "dist\SpecForge-Setup.exe"
+    Copy-Item -Force $exe $setup
     Write-Host ""
     Write-Host "Build succeeded: $exe"
-    Write-Host "Double-click that file to run SpecForge."
+    Write-Host "Installer copy:  $setup"
+    Write-Host "Run SpecForge-Setup.exe once to install under %LOCALAPPDATA%\Programs\SpecForge."
 } else {
     Write-Error "Build finished but dist\SpecForge.exe was not found."
 }

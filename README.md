@@ -48,7 +48,7 @@ PowerShell one-run bypass:
 powershell -ExecutionPolicy Bypass -File .\scripts\build_executable.ps1
 ```
 
-Output: `dist\SpecForge.exe`
+Output: `dist\SpecForge.exe` (CI also publishes `SpecForge-Setup.exe` for first-time installs)
 
 Build with **64-bit Python** (the scripts refuse 32-bit). A 32-bit exe can under-report logical CPUs on Windows.
 
@@ -64,7 +64,7 @@ SpecForge 1.3.5+ waits for the old process to exit, verifies the download checks
 
 1. Close SpecForge completely (Task Manager → end `SpecForge.exe` if needed)
 2. Delete `%TEMP%\_MEI*` folders if present
-3. Re-download `SpecForge.exe` from GitHub Releases, or run **Updates → Update now** again
+3. Re-download `SpecForge-Setup.exe` from GitHub Releases, or run **Updates → Update now** again
 4. Optionally install the latest [Microsoft VC++ x64 redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
 
 ### Temperatures on Windows (CPU / GPU)
@@ -96,6 +96,9 @@ It ignores useless values like `Intel64 Family 6 Model …` that `platform.proce
 
 ### Updates from GitHub (including exe auto-update)
 
+**First install:** download `SpecForge-Setup.exe` from GitHub Releases and run it.
+It installs to `%LOCALAPPDATA%\Programs\SpecForge\SpecForge.exe` and creates a Desktop shortcut.
+
 In SpecForge:
 
 - **GitHub** — open the repository in your browser
@@ -103,14 +106,14 @@ In SpecForge:
 
 Behavior:
 
-- **Running SpecForge.exe**: downloads the latest `SpecForge.exe` from GitHub Releases and replaces itself on restart
+- **Running SpecForge.exe** (installed under Programs): downloads the latest build from GitHub Releases and replaces itself on restart
 - **Git checkout**: `git pull origin main`
 - **Loose source folder**: downloads the latest source ZIP
 
-Windows releases are published automatically by GitHub Actions on every push to `main` (workflow: `.github/workflows/release-exe.yml`).  
-After this lands on `main`, wait for the Actions run to finish once so the `latest` release contains `SpecForge.exe`. Then **Update now** in the app can refresh the exe.
+Windows releases are published automatically by GitHub Actions on every push to `main` (workflow: `.github/workflows/release-exe.yml`).
+After this lands on `main`, wait for the Actions run to finish once so the `latest` release contains `SpecForge-Setup.exe`. Then **Update now** in the app can refresh the exe.
 
-### Tests
+## Tests
 
 ```powershell
 .\.venv\Scripts\Activate.ps1

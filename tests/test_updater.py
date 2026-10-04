@@ -103,6 +103,7 @@ def test_exe_check_skips_github_api(monkeypatch):
     assert info.remote_version == "1.3.12"
     assert info.exe_asset_url == updater.RELEASE_EXE_URL
     assert info.exe_sha256 == "deadbeef"
+    assert updater.EXE_ASSET_NAME == "SpecForge-Setup.exe"
 
 
 def test_apply_update_refuses_when_current(monkeypatch):
