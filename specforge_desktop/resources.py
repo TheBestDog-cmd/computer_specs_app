@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
+
+from specforge_desktop import __version__
 
 
 def project_root() -> Path:
@@ -32,20 +35,71 @@ def icon_png() -> Path:
     return asset_path("specforge.png")
 
 
-def ensure_sidecar_icon() -> Path | None:
-    """Copy SpecForge.ico next to the frozen exe so desktop shortcuts can pin it."""
+def _desktop_dir() -> Path | None:
+    desktop = Path(os.environ.get("USERPROFILE", "")) / "Desktop"
+    if desktop.is_dir():
+        return desktop
+    public = Path(os.environ.get("PUBLIC", r"C:\Users\Public")) / "Desktop"
+    return public if public.is_dir() else None
+
+
+def _appdata_icon_dir() -> Path:
+    base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    return base / "SpecForge"
+
+
+def ensure_appdata_icon() -> Path | None:
+    """Install a versioned .ico under LocalAppData (not on the Desktop).
+
+    Putting SpecForge.ico next to an exe that lives on the Desktop made a
+    visible .ico file appear there. AppData + a .lnk IconLocation avoids that
+    and also busts Windows' desktop icon cache across updates.
+    """
     if not getattr(sys, "frozen", False):
         return None
     src = icon_ico()
     if not src.exists():
         return None
-    dest = Path(sys.executable).resolve().with_name("SpecForge.ico")
+    dest_dir = _appdata_icon_dir()
     try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"SpecForge-{__version__}.ico"
         if (not dest.exists()) or dest.stat().st_size != src.stat().st_size:
             shutil.copy2(src, dest)
-        return dest
+        # Stable pointer used by the shortcut.
+        stable = dest_dir / "SpecForge.ico"
+        shutil.copy2(dest, stable)
+        return stable
     except OSError:
         return None
+
+
+def ensure_sidecar_icon() -> Path | None:
+    """Back-compat name: prefer AppData icon; never drop a visible .ico on Desktop."""
+    return ensure_appdata_icon()
+
+
+def _remove_loose_desktop_ico() -> None:
+    """Delete leftover SpecForge.ico that older builds copied onto the Desktop."""
+    desktop = _desktop_dir()
+    if not desktop:
+        return
+    loose = desktop / "SpecForge.ico"
+    try:
+        if loose.exists() and loose.is_file():
+            loose.unlink()
+    except OSError:
+        pass
+    # Also remove sidecar next to a Desktop-installed exe from older builds.
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable).resolve()
+        if _desktop_dir() and exe.parent.resolve() == _desktop_dir().resolve():
+            sibling = exe.with_name("SpecForge.ico")
+            try:
+                if sibling.exists():
+                    sibling.unlink()
+            except OSError:
+                pass
 
 
 def cleanup_stale_update_helpers() -> None:
@@ -68,32 +122,34 @@ def cleanup_stale_update_helpers() -> None:
 
 
 def refresh_desktop_shortcut() -> Path | None:
-    """Create/update a Desktop SpecForge.lnk that uses SpecForge.ico explicitly.
+    """Create/update Desktop\\SpecForge.lnk with IconLocation -> LocalAppData .ico.
 
-    Windows caches .exe icons aggressively after in-place updates; pointing the
-    shortcut at the sidecar .ico makes the brand icon show up reliably.
+    Do not leave a raw .ico on the Desktop. Use a .lnk so the brand icon shows
+    even when Windows caches the .exe glyph.
     """
     if not getattr(sys, "frozen", False) or not sys.platform.startswith("win"):
         return None
-    exe = Path(sys.executable).resolve()
-    ico = ensure_sidecar_icon() or exe.with_name("SpecForge.ico")
-    desktop = Path(os.environ.get("USERPROFILE", "")) / "Desktop"
-    if not desktop.is_dir():
-        desktop = Path(os.environ.get("PUBLIC", r"C:\Users\Public")) / "Desktop"
-    if not desktop.is_dir():
-        return None
-    lnk = desktop / "SpecForge.lnk"
-    # PowerShell COM shortcut write — hidden, no window.
-    try:
-        import subprocess
 
-        ico_path = str(ico if ico.exists() else exe)
+    _remove_loose_desktop_ico()
+    exe = Path(sys.executable).resolve()
+    ico = ensure_appdata_icon()
+    desktop = _desktop_dir()
+    if not desktop:
+        return None
+
+    lnk = desktop / "SpecForge.lnk"
+    ico_path = str(ico) if ico and ico.exists() else str(exe)
+
+    def _q(value: str) -> str:
+        return value.replace("'", "''")
+
+    try:
         ps = (
             f"$ws = New-Object -ComObject WScript.Shell; "
-            f"$s = $ws.CreateShortcut('{str(lnk).replace(chr(39), chr(39)+chr(39))}'); "
-            f"$s.TargetPath = '{str(exe).replace(chr(39), chr(39)+chr(39))}'; "
-            f"$s.WorkingDirectory = '{str(exe.parent).replace(chr(39), chr(39)+chr(39))}'; "
-            f"$s.IconLocation = '{ico_path.replace(chr(39), chr(39)+chr(39))},0'; "
+            f"$s = $ws.CreateShortcut('{_q(str(lnk))}'); "
+            f"$s.TargetPath = '{_q(str(exe))}'; "
+            f"$s.WorkingDirectory = '{_q(str(exe.parent))}'; "
+            f"$s.IconLocation = '{_q(ico_path)},0'; "
             f"$s.Description = 'SpecForge — Real-time Computer Specs'; "
             f"$s.Save()"
         )

@@ -21,3 +21,10 @@ def test_asset_path_under_assets():
 def test_small_png_assets_exist():
     assert resources.asset_path("specforge_32.png").exists()
     assert resources.asset_path("specforge_64.png").exists()
+
+
+def test_appdata_icon_helpers_are_callable():
+    # Non-frozen (dev) mode should no-op safely.
+    assert resources.ensure_appdata_icon() is None
+    assert resources.ensure_sidecar_icon() is None
+    assert resources.refresh_desktop_shortcut() is None
