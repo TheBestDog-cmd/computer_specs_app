@@ -14,6 +14,42 @@ from typing import Any
 import psutil
 
 
+def _subprocess_kwargs() -> dict[str, Any]:
+    """Hide console windows spawned by child processes on Windows."""
+    kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if platform.system() == "Windows":
+        # CREATE_NO_WINDOW prevents a CMD flash on every nvidia-smi / nvcc call.
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
+        kwargs["startupinfo"] = startupinfo
+    return kwargs
+
+
+def _run_capture(cmd: list[str], *, timeout: float = 3.0) -> str:
+    return subprocess.check_output(
+        cmd,
+        text=True,
+        timeout=timeout,
+        **_subprocess_kwargs(),
+    )
+
+
+_CUDA_CACHE: dict[str, Any] | None = None
+_NVIDIA_SMI: str | None | bool = False  # False = unset, None = missing, str = path
+
+
+def _nvidia_smi_path() -> str | None:
+    global _NVIDIA_SMI
+    if _NVIDIA_SMI is False:
+        _NVIDIA_SMI = shutil.which("nvidia-smi")
+    return _NVIDIA_SMI  # type: ignore[return-value]
+
+
 def _bytes_human(n: float | int | None) -> str:
     if n is None:
         return "n/a"
@@ -90,7 +126,8 @@ def _power_supply() -> list[dict[str, Any]]:
 
 
 def _gpu_nvidia() -> list[dict[str, Any]]:
-    if not shutil.which("nvidia-smi"):
+    smi = _nvidia_smi_path()
+    if not smi:
         return []
     query = (
         "name,driver_version,memory.total,memory.used,memory.free,"
@@ -98,14 +135,12 @@ def _gpu_nvidia() -> list[dict[str, Any]]:
         "clocks.sm,clocks.mem"
     )
     try:
-        out = subprocess.check_output(
+        out = _run_capture(
             [
-                "nvidia-smi",
+                smi,
                 f"--query-gpu={query}",
                 "--format=csv,noheader,nounits",
             ],
-            text=True,
-            stderr=subprocess.DEVNULL,
             timeout=3,
         )
     except (subprocess.SubprocessError, OSError):
@@ -137,11 +172,15 @@ def _gpu_nvidia() -> list[dict[str, Any]]:
 
 
 def _cuda_toolkit() -> dict[str, Any]:
+    global _CUDA_CACHE
+    if _CUDA_CACHE is not None:
+        return dict(_CUDA_CACHE)
+
     info: dict[str, Any] = {"toolkit_detected": False, "nvcc_version": None, "note": None}
     nvcc = shutil.which("nvcc")
     if nvcc:
         try:
-            out = subprocess.check_output([nvcc, "--version"], text=True, stderr=subprocess.STDOUT, timeout=3)
+            out = _run_capture([nvcc, "--version"], timeout=3)
             for line in out.splitlines():
                 if "release" in line.lower():
                     info["nvcc_version"] = line.strip()
@@ -151,6 +190,7 @@ def _cuda_toolkit() -> dict[str, Any]:
             pass
     if not info["toolkit_detected"]:
         info["note"] = "CUDA toolkit / nvcc not detected on PATH. NVIDIA GPUs still report via nvidia-smi when present."
+    _CUDA_CACHE = dict(info)
     return info
 
 

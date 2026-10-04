@@ -38,6 +38,8 @@ The binary is written to `dist/SpecForge` (Linux/macOS) or `dist/SpecForge.exe` 
 
 Double-click / run that file anytime — no Python install required on the target machine for the frozen build.
 
+On Windows, build with `scripts\build_executable.bat` (uses `--noconsole`). Rebuild after pulling fixes so `nvidia-smi` refresh calls no longer flash a CMD window every second.
+
 ### Tests
 
 ```bash
