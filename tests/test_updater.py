@@ -106,6 +106,34 @@ def test_exe_check_skips_github_api(monkeypatch):
     assert updater.EXE_ASSET_NAME == "SpecForge-Setup.exe"
 
 
+def test_release_json_uses_download_safe_accept(monkeypatch):
+    """Release CDN must not send Accept: application/json (GitHub 403s that)."""
+    seen: dict[str, str] = {}
+
+    class _Resp:
+        def read(self) -> bytes:
+            return b'{"version":"9.9.9"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    def fake_urlopen(req, timeout=20):  # noqa: ARG001
+        # urllib stores header names title-cased.
+        seen["accept"] = req.get_header("Accept") or ""
+        seen["ua"] = req.get_header("User-agent") or req.get_header("User-Agent") or ""
+        return _Resp()
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
+    data = updater._http_json(updater.RELEASE_VERSION_URL)
+    assert data["version"] == "9.9.9"
+    assert seen["accept"] == "*/*"
+    assert "application/json" not in seen["accept"].lower()
+    assert "github" not in seen["accept"].lower()
+
+
 def test_apply_update_refuses_when_current(monkeypatch):
     info = updater.UpdateInfo(
         local_version="1.3.3",

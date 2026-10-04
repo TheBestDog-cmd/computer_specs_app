@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import webbrowser
@@ -43,6 +44,10 @@ RELEASE_EXE_FALLBACK_URL = (
     f"{EXE_ASSET_FALLBACK}"
 )
 RELEASES_PAGE_URL = f"{REPO_URL}/releases/latest"
+# Short in-process cache so opening Updates repeatedly does not re-hit GitHub.
+_VERSION_META_CACHE: dict[str, Any] | None = None
+_VERSION_META_CACHE_AT = 0.0
+_VERSION_META_CACHE_TTL_SEC = 300.0
 
 
 def parse_version(value: str | None) -> tuple[int, ...]:
@@ -131,8 +136,9 @@ def _friendly_http_error(exc: urllib.error.HTTPError) -> str:
     reason = str(exc.reason or "")
     if exc.code == 403 and "rate limit" in reason.lower():
         return (
-            "GitHub API rate limit exceeded.\n"
-            f"Download SpecForge-Setup.exe from {RELEASES_PAGE_URL}, or try Check again later."
+            "GitHub rate limit exceeded while checking for updates.\n"
+            f"Update now (if enabled) still works via direct download.\n"
+            f"Or get SpecForge-Setup.exe from {RELEASES_PAGE_URL}."
         )
     if exc.code == 403:
         return (
@@ -142,20 +148,45 @@ def _friendly_http_error(exc: urllib.error.HTTPError) -> str:
     return f"HTTP Error {exc.code}: {reason}"
 
 
+def _http_get_bytes(url: str, timeout: int = 20) -> bytes:
+    """GET bytes with browser-like headers (no API Accept).
+
+    GitHub release asset URLs (/releases/download/...) 403 with
+    'rate limit exceeded' when Accept looks like an API request
+    (e.g. application/json). Mirror the working download path.
+    """
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "*/*",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
 def _http_json(url: str) -> dict[str, Any]:
-    headers = {"User-Agent": USER_AGENT}
     if "api.github.com" in url:
-        headers["Accept"] = "application/vnd.github+json"
-    else:
-        headers["Accept"] = "application/json"
-    req = urllib.request.Request(url, headers=headers)
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/vnd.github+json",
+        }
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 403:
+                raise RuntimeError(_friendly_http_error(exc)) from exc
+            raise
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        raw = _http_get_bytes(url)
     except urllib.error.HTTPError as exc:
-        if "api.github.com" in url and exc.code == 403:
+        if exc.code == 403:
             raise RuntimeError(_friendly_http_error(exc)) from exc
         raise
+    return json.loads(raw.decode("utf-8"))
 
 
 def _http_download(
@@ -163,7 +194,13 @@ def _http_download(
     dest: Path,
     progress: Callable[[int, int | None], None] | None = None,
 ) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "*/*",
+        },
+    )
     with urllib.request.urlopen(req, timeout=180) as resp, open(dest, "wb") as out:
         total = resp.headers.get("Content-Length")
         total_i = int(total) if total and total.isdigit() else None
@@ -230,19 +267,35 @@ def fetch_latest_release() -> dict[str, Any] | None:
         raise
 
 
-def fetch_published_version_meta() -> dict[str, Any] | None:
+def fetch_published_version_meta(*, bypass_cache: bool = False) -> dict[str, Any] | None:
     """Load version.json from the GitHub release CDN (not the REST API).
 
-    Unauthenticated api.github.com caps at ~60 requests/hour/IP, which breaks
-    Check again for shared networks. The /releases/download/ CDN does not.
+    Uses the same Accept headers as the working exe download path. Sending
+    Accept: application/json to /releases/download/ can 403 with
+    'rate limit exceeded' even though the file download itself succeeds.
     """
+    global _VERSION_META_CACHE, _VERSION_META_CACHE_AT
+
+    now = time.monotonic()
+    if (
+        not bypass_cache
+        and _VERSION_META_CACHE is not None
+        and (now - _VERSION_META_CACHE_AT) < _VERSION_META_CACHE_TTL_SEC
+    ):
+        return dict(_VERSION_META_CACHE)
+
     try:
         meta = _http_json(RELEASE_VERSION_URL)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return None
         raise
-    return meta if isinstance(meta, dict) else None
+    if not isinstance(meta, dict):
+        return None
+
+    _VERSION_META_CACHE = dict(meta)
+    _VERSION_META_CACHE_AT = now
+    return dict(meta)
 
 
 def _asset_map(release: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -269,7 +322,7 @@ def check_for_updates(local_version: str) -> UpdateInfo:
     meta: dict[str, Any] | None = None
     try:
         meta = fetch_published_version_meta()
-    except urllib.error.HTTPError:
+    except (urllib.error.HTTPError, RuntimeError):
         if mode == "exe":
             raise
         meta = None
