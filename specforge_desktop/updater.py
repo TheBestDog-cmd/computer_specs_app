@@ -587,12 +587,14 @@ def _windows_update_ps1(
 
     stale_cmd_pat = r"^(cmd|wscript|cscript)\.exe$"
     stale_line_pat = r"_specforge_update\.bat|SpecForge\.exe\.new"
+    extract_dir = str((exe_path.parent / "tmp").resolve()).replace("'", "''")
 
     ps = f"""$ErrorActionPreference = 'Continue'
 $exe = '{exe_lit}'
 $new = '{new_lit}'
 $log = '{log_lit}'
 $dir = '{dir_lit}'
+$extractRoot = '{extract_dir}'
 $pidToWait = {int(pid)}
 function Log([string]$msg) {{
   $line = "{{0}} {{1}}" -f (Get-Date -Format o), $msg
@@ -606,8 +608,8 @@ Log "SpecForge silent update starting (wait PID $pidToWait)"
 try {{
   $proc = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue
   if ($proc) {{
-    Log "Waiting up to 20s for PID $pidToWait"
-    Wait-Process -Id $pidToWait -Timeout 20 -ErrorAction SilentlyContinue
+    Log "Waiting up to 25s for PID $pidToWait"
+    Wait-Process -Id $pidToWait -Timeout 25 -ErrorAction SilentlyContinue
   }}
 }} catch {{
   Log "Wait-Process: $_"
@@ -617,7 +619,7 @@ $alive = @(Get-Process -Name 'SpecForge' -ErrorAction SilentlyContinue)
 if ($alive.Count -gt 0) {{
   Log ("Force-stopping remaining SpecForge processes: " + (($alive | ForEach-Object {{ $_.Id }}) -join ','))
   Stop-Process -Name 'SpecForge' -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Seconds 2
+  Start-Sleep -Seconds 3
 }}
 
 # Kill leftover visible updaters from older SpecForge builds (blank cmd windows).
@@ -638,57 +640,114 @@ Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
   }}
 
 Log "Process clear; settling and cleaning _MEI extract dirs"
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 4
+
+function Clear-MeiDirs([string]$root) {{
+  if (-not (Test-Path -LiteralPath $root)) {{ return }}
+  Get-ChildItem -LiteralPath $root -Directory -Filter '_MEI*' -ErrorAction SilentlyContinue |
+    ForEach-Object {{
+      try {{
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop
+        Log ("Removed " + $_.FullName)
+      }} catch {{
+        Log ("Could not remove " + $_.FullName + ": $_")
+      }}
+    }}
+}}
 
 # Stale PyInstaller one-file unpack dirs cause: Failed to load Python DLL ... python312.dll
-Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter '_MEI*' -ErrorAction SilentlyContinue |
-  ForEach-Object {{
-    try {{
-      Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop
-      Log ("Removed " + $_.FullName)
-    }} catch {{
-      Log ("Could not remove " + $_.FullName + ": $_")
-    }}
-  }}
+Clear-MeiDirs $env:TEMP
+Clear-MeiDirs $env:TMP
+Clear-MeiDirs $extractRoot
+try {{
+  New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+}} catch {{
+  Log "Could not create private extract dir: $_"
+}}
 
-Start-Sleep -Seconds 1
+Start-Sleep -Seconds 2
 
 if (-not (Test-Path -LiteralPath $new)) {{
   Log "Missing downloaded file: $new"
   exit 1
 }}
+$expectedSize = (Get-Item -LiteralPath $new).Length
 
-for ($i = 0; $i -lt 60; $i++) {{
+for ($i = 0; $i -lt 80; $i++) {{
   try {{
     if (Test-Path -LiteralPath $exe) {{
       Remove-Item -LiteralPath $exe -Force -ErrorAction Stop
     }}
     if (-not (Test-Path -LiteralPath $exe)) {{ break }}
   }} catch {{
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds 400
   }}
 }}
 
 try {{
-  Copy-Item -LiteralPath $new -Destination $exe -Force
-  Log "Copied new exe into place"
+  # Same-volume rename avoids a half-written SpecForge.exe if copy is interrupted.
+  Move-Item -LiteralPath $new -Destination $exe -Force
+  Log "Moved new exe into place"
 }} catch {{
-  Log "Copy failed: $_"
+  try {{
+    Copy-Item -LiteralPath $new -Destination $exe -Force
+    Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue
+    Log "Copied new exe into place (move fallback)"
+  }} catch {{
+    Log "Copy/move failed: $_"
+    exit 1
+  }}
+}}
+
+if (-not (Test-Path -LiteralPath $exe)) {{
+  Log "Installed exe missing after replace"
+  exit 1
+}}
+$gotSize = (Get-Item -LiteralPath $exe).Length
+if ($gotSize -ne $expectedSize) {{
+  Log "Size mismatch after replace: expected $expectedSize got $gotSize"
   exit 1
 }}
 
-Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue
 {commit_block}
 try {{ Unblock-File -LiteralPath $exe -ErrorAction SilentlyContinue }} catch {{}}
+try {{
+  Remove-Item -LiteralPath ($exe + ':Zone.Identifier') -Force -ErrorAction SilentlyContinue
+}} catch {{}}
 
-# Nudge Explorer icon cache for this path (desktop shortcuts may still need recreate).
+# Nudge Explorer / Defender to finish touching the new file before we launch.
 try {{ (Get-Item -LiteralPath $exe).LastWriteTime = Get-Date }} catch {{}}
+Start-Sleep -Seconds 4
 
-Start-Sleep -Seconds 2
-Log "Launching $exe"
+Log "Launching $exe (private TEMP=$extractRoot)"
 $env:SPEC_FORGE_UPDATED = '1'
-Start-Process -FilePath $exe -WorkingDirectory $dir
-Log "Start-Process issued"
+$env:TEMP = $extractRoot
+$env:TMP = $extractRoot
+
+$launched = $false
+for ($t = 0; $t -lt 5; $t++) {{
+  Clear-MeiDirs $extractRoot
+  try {{
+    $p = Start-Process -FilePath $exe -WorkingDirectory $dir -PassThru
+    Log ("Start-Process attempt $($t+1) PID=$($p.Id)")
+    Start-Sleep -Seconds 4
+    $p.Refresh()
+    if (-not $p.HasExited) {{
+      Log "Launch appears healthy"
+      $launched = $true
+      break
+    }}
+    Log ("Process exited early code=$($p.ExitCode); retrying after MEI cleanup")
+  }} catch {{
+    Log "Launch failed: $_"
+  }}
+  Start-Sleep -Seconds 2
+}}
+
+if (-not $launched) {{
+  Log "WARNING: could not confirm a healthy SpecForge relaunch"
+}}
+
 # Self-delete when possible
 Start-Sleep -Seconds 1
 Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
@@ -805,6 +864,14 @@ def download_and_replace_exe(
             pass
 
     verify_downloaded_exe(new_path, expected_sha256=expected_sha)
+
+    # Best-effort clear of leftover extracts before we exit and the swap script runs.
+    try:
+        from specforge_desktop import resources as _resources
+
+        _resources.cleanup_foreign_mei_dirs()
+    except Exception:
+        pass
 
     script = _windows_update_ps1(exe, new_path, remote_commit, os.getpid())
     _launch_silent_updater(script, exe.parent)

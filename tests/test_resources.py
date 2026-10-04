@@ -30,6 +30,7 @@ def test_install_helpers_noop_when_not_frozen():
     assert resources.relaunch_from_app_install_if_needed() is False
     assert resources.running_from_app_install() is False
     assert resources.is_setup_executable() is False
+    resources.cleanup_foreign_mei_dirs()  # safe no-op when not frozen
     installed = resources.installed_exe_path()
     assert installed.name == "SpecForge.exe"
     assert installed.parent.name == "SpecForge"

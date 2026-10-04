@@ -816,16 +816,19 @@ class UpdatesDialog(ctk.CTkToplevel):
                 msg = f"Update failed:\n{exc}"
 
             def finish():
-                # Re-check so Update now stays disabled once we're current.
+                self._done(msg)
+                if should_restart:
+                    # Exit immediately — do not Check GitHub again first.
+                    # The silent updater is already waiting on this PID, and a
+                    # delayed exit keeps the old _MEI extract locked longer
+                    # (python312.dll failures on relaunch).
+                    self.after(100, self._restart_for_exe_update)
+                    return
                 try:
                     self._latest_info = updater.check_for_updates(__version__)
                 except Exception:
                     self._latest_info = None
-                self._done(msg)
-                if should_restart:
-                    # Exit ASAP so the silent updater is not stuck waiting on us.
-                    # (Older builds used a visible cmd+find loop that hung forever.)
-                    self.after(250, self._restart_for_exe_update)
+                self._busy(False)
 
             self.after(0, finish)
 
@@ -852,5 +855,6 @@ def run_app() -> None:
     # shortcut, relaunch from there, then exit so leftovers can be deleted.
     if resources.relaunch_from_app_install_if_needed():
         return
+    resources.cleanup_foreign_mei_dirs()
     app = SpecForgeApp()
     app.mainloop()

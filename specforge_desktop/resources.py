@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -264,6 +265,48 @@ def _remove_loose_install_artifacts(installed: Path | None) -> None:
             _unlink_with_retry(legacy_exe)
     except OSError:
         pass
+
+
+def cleanup_foreign_mei_dirs() -> None:
+    """Remove leftover PyInstaller _MEI* dirs except this process's own extract.
+
+    Helps recover from a failed post-update relaunch where the new exe crashed
+    with 'Failed to load Python DLL ... python312.dll' because a half-dead
+    extract folder was left behind.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    own: Path | None = None
+    try:
+        own = Path(getattr(sys, "_MEIPASS")).resolve()
+    except Exception:
+        own = None
+
+    roots = {Path(tempfile.gettempdir())}
+    try:
+        roots.add(_install_dir() / "tmp")
+    except Exception:
+        pass
+    try:
+        roots.add(_legacy_appdata_dir() / "tmp")
+    except Exception:
+        pass
+
+    for root in roots:
+        try:
+            if not root.is_dir():
+                continue
+            for path in root.glob("_MEI*"):
+                if not path.is_dir():
+                    continue
+                try:
+                    if own and path.resolve() == own:
+                        continue
+                except OSError:
+                    pass
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
 
 
 def cleanup_stale_update_helpers() -> None:
