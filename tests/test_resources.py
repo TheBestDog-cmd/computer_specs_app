@@ -8,9 +8,16 @@ def test_icon_assets_exist():
     assert resources.icon_png().exists()
     assert resources.icon_ico().suffix == ".ico"
     assert resources.icon_png().suffix == ".png"
+    # Classic BMP ICO (no PNG-compressed frames) for reliable Explorer icons.
+    assert b"\x89PNG" not in resources.icon_ico().read_bytes()
 
 
 def test_asset_path_under_assets():
     path = resources.asset_path("specforge.ico")
     assert path.name == "specforge.ico"
     assert path.parent.name == "assets"
+
+
+def test_small_png_assets_exist():
+    assert resources.asset_path("specforge_32.png").exists()
+    assert resources.asset_path("specforge_64.png").exists()

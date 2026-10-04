@@ -31,7 +31,7 @@ if errorlevel 1 exit /b 1
 REM --noconsole keeps SpecForge GUI-only (no console attached to the app itself).
 REM nvidia-smi refresh flashes are suppressed in collector.py via CREATE_NO_WINDOW.
 REM --icon sets the .exe / desktop / taskbar icon to match the in-app window icon.
-pyinstaller --noconfirm --clean --onefile --noconsole --name SpecForge --icon "%CD%\assets\specforge.ico" --version-file "%CD%\assets\version_info.txt" --add-data "assets\specforge.ico;assets" --add-data "assets\specforge.png;assets" --collect-all customtkinter main.py
+pyinstaller --noconfirm --clean --onefile --noconsole --name SpecForge --icon "%CD%\assets\specforge.ico" --version-file "%CD%\assets\version_info.txt" --add-data "assets\specforge.ico;assets" --add-data "assets\specforge.png;assets" --add-data "assets\specforge_32.png;assets" --add-data "assets\specforge_64.png;assets" --collect-all customtkinter main.py
 if errorlevel 1 exit /b 1
 
 if not exist "dist\SpecForge.exe" (

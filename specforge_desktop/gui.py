@@ -408,6 +408,8 @@ class SpecForgeApp(ctk.CTk):
         resources.cleanup_stale_update_helpers()
         resources.ensure_sidecar_icon()
         apply_window_icon(self)
+        # Refresh desktop shortcut icon off the UI thread (COM / PowerShell).
+        threading.Thread(target=resources.refresh_desktop_shortcut, daemon=True).start()
 
         self._build_header()
         self._build_body()

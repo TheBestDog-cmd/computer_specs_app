@@ -19,6 +19,8 @@ pyinstaller \
   --version-file "$ROOT/assets/version_info.txt" \
   --add-data "assets/specforge.ico:assets" \
   --add-data "assets/specforge.png:assets" \
+  --add-data "assets/specforge_32.png:assets" \
+  --add-data "assets/specforge_64.png:assets" \
   --collect-all customtkinter \
   main.py
 echo "Executable: $ROOT/dist/SpecForge"

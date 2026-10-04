@@ -32,8 +32,10 @@ jobs:
           .\.venv\Scripts\pip install -r requirements.txt
           $icon = Join-Path $PWD "assets\specforge.ico"
           $verinfo = Join-Path $PWD "assets\version_info.txt"
-          .\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --noconsole --name SpecForge --icon $icon --version-file $verinfo --add-data "assets\specforge.ico;assets" --add-data "assets\specforge.png;assets" --collect-all customtkinter main.py
+          .\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --noconsole --name SpecForge --icon $icon --version-file $verinfo --add-data "assets\specforge.ico;assets" --add-data "assets\specforge.png;assets" --add-data "assets\specforge_32.png;assets" --add-data "assets\specforge_64.png;assets" --collect-all customtkinter main.py
           if (-not (Test-Path "dist\SpecForge.exe")) { throw "SpecForge.exe was not built" }
+          .\.venv\Scripts\pip install pefile -q
+          .\.venv\Scripts\python -c "import pefile; pe=pefile.PE('dist/SpecForge.exe'); types=[(e.name if e.name else __import__('pefile').RESOURCE_TYPE.get(e.id,e.id)) for e in pe.DIRECTORY_ENTRY_RESOURCE.entries]; assert any('ICON' in str(t).upper() or t in (3,14,'RT_ICON','RT_GROUP_ICON') for t in types), types; print('PE icon resources OK', types)"
 
       - name: Write release metadata
         shell: pwsh
