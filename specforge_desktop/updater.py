@@ -28,6 +28,16 @@ ZIPBALL_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/archive/refs/hea
 USER_AGENT = "SpecForge-Updater/1.3"
 EXE_ASSET_NAME = "SpecForge.exe"
 VERSION_ASSET_NAME = "version.json"
+# Release CDN URLs — not api.github.com (avoids unauthenticated 60/hr API quota).
+RELEASE_VERSION_URL = (
+    f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/latest/"
+    f"{VERSION_ASSET_NAME}"
+)
+RELEASE_EXE_URL = (
+    f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/latest/"
+    f"{EXE_ASSET_NAME}"
+)
+RELEASES_PAGE_URL = f"{REPO_URL}/releases/latest"
 
 
 def parse_version(value: str | None) -> tuple[int, ...]:
@@ -111,16 +121,36 @@ def _subprocess_kwargs() -> dict[str, Any]:
     return kwargs
 
 
+def _friendly_http_error(exc: urllib.error.HTTPError) -> str:
+    """Turn GitHub HTTP failures into an actionable SpecForge message."""
+    reason = str(exc.reason or "")
+    if exc.code == 403 and "rate limit" in reason.lower():
+        return (
+            "GitHub API rate limit exceeded.\n"
+            f"Download SpecForge.exe from {RELEASES_PAGE_URL}, or try Check again later."
+        )
+    if exc.code == 403:
+        return (
+            f"GitHub returned HTTP 403 ({reason}).\n"
+            f"Try again later, or download from {RELEASES_PAGE_URL}."
+        )
+    return f"HTTP Error {exc.code}: {reason}"
+
+
 def _http_json(url: str) -> dict[str, Any]:
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "application/vnd.github+json",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    headers = {"User-Agent": USER_AGENT}
+    if "api.github.com" in url:
+        headers["Accept"] = "application/vnd.github+json"
+    else:
+        headers["Accept"] = "application/json"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if "api.github.com" in url and exc.code == 403:
+            raise RuntimeError(_friendly_http_error(exc)) from exc
+        raise
 
 
 def _http_download(
@@ -195,6 +225,21 @@ def fetch_latest_release() -> dict[str, Any] | None:
         raise
 
 
+def fetch_published_version_meta() -> dict[str, Any] | None:
+    """Load version.json from the GitHub release CDN (not the REST API).
+
+    Unauthenticated api.github.com caps at ~60 requests/hour/IP, which breaks
+    Check again for shared networks. The /releases/download/ CDN does not.
+    """
+    try:
+        meta = _http_json(RELEASE_VERSION_URL)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    return meta if isinstance(meta, dict) else None
+
+
 def _asset_map(release: dict[str, Any]) -> dict[str, dict[str, Any]]:
     assets = release.get("assets") or []
     return {a.get("name"): a for a in assets if a.get("name")}
@@ -204,35 +249,73 @@ def check_for_updates(local_version: str) -> UpdateInfo:
     root = project_root()
     mode = detect_mode(root)
     local = local_commit(root)
-    remote, message, date = fetch_remote_commit()
-    release = fetch_latest_release()
-    release_tag = release.get("tag_name") if release else None
-    release_url = release.get("html_url") if release else None
 
-    exe_url = None
-    remote_version = None
+    remote: str | None = None
+    message: str | None = None
+    date: str | None = None
+    release_tag: str | None = None
+    release_url: str | None = RELEASES_PAGE_URL
+    exe_url: str | None = None
+    remote_version: str | None = None
     can_update_exe = False
-    exe_sha256 = None
-    if release:
-        assets = _asset_map(release)
-        exe_asset = assets.get(EXE_ASSET_NAME)
-        if exe_asset and exe_asset.get("browser_download_url"):
-            exe_url = exe_asset["browser_download_url"]
-            can_update_exe = True
-            digest = str(exe_asset.get("digest") or "")
-            if digest.lower().startswith("sha256:"):
-                exe_sha256 = digest.split(":", 1)[1].strip().lower()
-        version_asset = assets.get(VERSION_ASSET_NAME)
-        if version_asset and version_asset.get("browser_download_url"):
+    exe_sha256: str | None = None
+
+    # Prefer CDN version.json so frozen installs never burn GitHub API quota.
+    meta: dict[str, Any] | None = None
+    try:
+        meta = fetch_published_version_meta()
+    except urllib.error.HTTPError:
+        if mode == "exe":
+            raise
+        meta = None
+    except Exception:
+        meta = None
+
+    if meta:
+        remote_version = str(meta.get("version") or "") or None
+        if meta.get("commit"):
+            remote = str(meta["commit"])[:40]
+        if meta.get("sha256"):
+            exe_sha256 = str(meta["sha256"]).strip().lower()
+        release_tag = str(meta.get("tag") or "latest")
+        can_update_exe = True
+        exe_url = RELEASE_EXE_URL
+
+    # Source/git installs may still need the REST API for commit comparison.
+    # Frozen exe installs skip it entirely once version.json is available.
+    if mode != "exe" and not (remote_version and remote):
+        try:
+            remote, message, date = fetch_remote_commit()
+        except (urllib.error.HTTPError, RuntimeError):
+            if not meta:
+                raise
+        if not meta:
             try:
-                meta = _http_json(version_asset["browser_download_url"])
-                remote_version = meta.get("version")
-                if meta.get("commit"):
-                    remote = str(meta["commit"])[:40]
-                if meta.get("sha256"):
-                    exe_sha256 = str(meta["sha256"]).strip().lower()
-            except Exception:
-                pass
+                release = fetch_latest_release()
+            except (urllib.error.HTTPError, RuntimeError):
+                release = None
+            if release:
+                release_tag = release.get("tag_name") or release_tag
+                release_url = release.get("html_url") or release_url
+                assets = _asset_map(release)
+                exe_asset = assets.get(EXE_ASSET_NAME)
+                if exe_asset and exe_asset.get("browser_download_url"):
+                    exe_url = exe_asset["browser_download_url"]
+                    can_update_exe = True
+                    digest = str(exe_asset.get("digest") or "")
+                    if digest.lower().startswith("sha256:"):
+                        exe_sha256 = digest.split(":", 1)[1].strip().lower()
+                version_asset = assets.get(VERSION_ASSET_NAME)
+                if version_asset and version_asset.get("browser_download_url"):
+                    try:
+                        api_meta = _http_json(version_asset["browser_download_url"])
+                        remote_version = api_meta.get("version") or remote_version
+                        if api_meta.get("commit"):
+                            remote = str(api_meta["commit"])[:40]
+                        if api_meta.get("sha256"):
+                            exe_sha256 = str(api_meta["sha256"]).strip().lower()
+                    except Exception:
+                        pass
 
     if remote_version:
         available = is_newer_version(remote_version, local_version)
@@ -242,7 +325,6 @@ def check_for_updates(local_version: str) -> UpdateInfo:
             else f"You are up to date (installed {local_version}; GitHub {remote_version})."
         )
     elif remote and local:
-        # Source/git installs may not publish version.json yet — fall back to commits.
         available = remote.lower() != local.lower()
         detail = (
             "A newer build is on GitHub."
@@ -250,7 +332,6 @@ def check_for_updates(local_version: str) -> UpdateInfo:
             else "You are up to date with GitHub."
         )
     elif remote and not local:
-        # Without a local commit marker, only offer an update when a newer version is known.
         available = is_newer_version(remote_version, local_version) if remote_version else False
         detail = (
             f"GitHub publishes version {remote_version}; this install has no local commit marker."
@@ -259,7 +340,7 @@ def check_for_updates(local_version: str) -> UpdateInfo:
         )
     else:
         available = False
-        detail = "Could not read the latest GitHub commit/release."
+        detail = "Could not read the latest GitHub release metadata."
 
     if mode == "exe":
         # Frozen installs only update when a newer version.json + SpecForge.exe exist.

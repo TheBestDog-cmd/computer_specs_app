@@ -36,30 +36,22 @@ def test_is_newer_version():
 def test_check_for_updates_uses_version_when_present(monkeypatch):
     monkeypatch.setattr(updater, "detect_mode", lambda root=None: "source")
     monkeypatch.setattr(updater, "local_commit", lambda root=None: "aaa")
-    monkeypatch.setattr(updater, "fetch_remote_commit", lambda: ("bbb", "msg", "2026-01-01"))
     monkeypatch.setattr(
         updater,
-        "fetch_latest_release",
-        lambda: {
-            "tag_name": "latest",
-            "html_url": "https://example.com",
-            "assets": [
-                {"name": "version.json", "browser_download_url": "https://example.com/version.json"},
-                {"name": "SpecForge.exe", "browser_download_url": "https://example.com/SpecForge.exe"},
-            ],
-        },
+        "fetch_published_version_meta",
+        lambda: {"version": "1.3.4", "commit": "bbb", "tag": "latest", "sha256": "abc"},
     )
 
-    def fake_json(url: str):
-        if url.endswith("version.json"):
-            return {"version": "1.3.4", "commit": "bbb"}
-        raise AssertionError(url)
+    def boom(*_a, **_k):
+        raise AssertionError("REST API should not be needed when CDN meta is present")
 
-    monkeypatch.setattr(updater, "_http_json", fake_json)
+    monkeypatch.setattr(updater, "fetch_remote_commit", boom)
+    monkeypatch.setattr(updater, "fetch_latest_release", boom)
 
     newer = updater.check_for_updates("1.3.3")
     assert newer.update_available is True
     assert newer.remote_version == "1.3.4"
+    assert newer.exe_asset_url == updater.RELEASE_EXE_URL
 
     current = updater.check_for_updates("1.3.4")
     assert current.update_available is False
@@ -68,24 +60,49 @@ def test_check_for_updates_uses_version_when_present(monkeypatch):
 def test_exe_update_requires_newer_version(monkeypatch):
     monkeypatch.setattr(updater, "detect_mode", lambda root=None: "exe")
     monkeypatch.setattr(updater, "local_commit", lambda root=None: "aaa")
-    monkeypatch.setattr(updater, "fetch_remote_commit", lambda: ("bbb", "msg", "2026-01-01"))
     monkeypatch.setattr(
         updater,
-        "fetch_latest_release",
-        lambda: {
-            "tag_name": "latest",
-            "html_url": "https://example.com",
-            "assets": [
-                {"name": "version.json", "browser_download_url": "https://example.com/version.json"},
-                {"name": "SpecForge.exe", "browser_download_url": "https://example.com/SpecForge.exe"},
-            ],
-        },
+        "fetch_published_version_meta",
+        lambda: {"version": "1.3.3", "commit": "bbb", "tag": "latest", "sha256": "abc"},
     )
-    monkeypatch.setattr(updater, "_http_json", lambda url: {"version": "1.3.3", "commit": "bbb"})
+
+    def boom(*_a, **_k):
+        raise AssertionError("exe checks must not call the GitHub REST API")
+
+    monkeypatch.setattr(updater, "fetch_remote_commit", boom)
+    monkeypatch.setattr(updater, "fetch_latest_release", boom)
 
     info = updater.check_for_updates("1.3.3")
     assert info.update_available is False
     assert info.can_update_exe is False
+
+
+def test_exe_check_skips_github_api(monkeypatch):
+    monkeypatch.setattr(updater, "detect_mode", lambda root=None: "exe")
+    monkeypatch.setattr(updater, "local_commit", lambda root=None: None)
+    monkeypatch.setattr(
+        updater,
+        "fetch_published_version_meta",
+        lambda: {
+            "version": "1.3.12",
+            "commit": "cccc",
+            "tag": "latest",
+            "sha256": "deadbeef",
+        },
+    )
+
+    def boom(*_a, **_k):
+        raise AssertionError("exe checks must not call the GitHub REST API")
+
+    monkeypatch.setattr(updater, "fetch_remote_commit", boom)
+    monkeypatch.setattr(updater, "fetch_latest_release", boom)
+
+    info = updater.check_for_updates("1.3.11")
+    assert info.update_available is True
+    assert info.can_update_exe is True
+    assert info.remote_version == "1.3.12"
+    assert info.exe_asset_url == updater.RELEASE_EXE_URL
+    assert info.exe_sha256 == "deadbeef"
 
 
 def test_apply_update_refuses_when_current(monkeypatch):
