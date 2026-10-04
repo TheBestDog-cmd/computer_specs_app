@@ -5,7 +5,6 @@ from __future__ import annotations
 import threading
 import time
 from datetime import datetime
-from typing import Callable
 
 import customtkinter as ctk
 
@@ -40,9 +39,11 @@ class MeterRow(ctk.CTkFrame):
     def __init__(self, master, title: str, **kwargs):
         super().__init__(master, fg_color="transparent", **kwargs)
         self.grid_columnconfigure(1, weight=1)
+        self._last_label = None
+        self._last_pct = None
         self.title = ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=13, weight="bold"), text_color=ACCENT_DEEP)
         self.title.grid(row=0, column=0, columnspan=2, sticky="w")
-        self.value = ctk.CTkLabel(self, text="—", font=ctk.CTkFont(family="monospace", size=12), text_color=MUTED)
+        self.value = ctk.CTkLabel(self, text="—", font=ctk.CTkFont(family="Consolas", size=12), text_color=MUTED)
         self.value.grid(row=1, column=0, sticky="w", padx=(0, 8))
         self.bar = ctk.CTkProgressBar(self, height=10, progress_color=ACCENT, fg_color=TRACK)
         self.bar.grid(row=1, column=1, sticky="ew")
@@ -50,6 +51,11 @@ class MeterRow(ctk.CTkFrame):
 
     def update_meter(self, percent: float | None, label: str) -> None:
         pct = 0.0 if percent is None else max(0.0, min(float(percent), 100.0))
+        # Avoid redundant widget updates (major source of scroll jank).
+        if label == self._last_label and self._last_pct is not None and abs(pct - self._last_pct) < 0.2:
+            return
+        self._last_label = label
+        self._last_pct = pct
         self.bar.set(pct / 100.0)
         self.bar.configure(progress_color=WARN if pct >= 85 else ACCENT)
         self.value.configure(text=label)
@@ -57,21 +63,36 @@ class MeterRow(ctk.CTkFrame):
 
 class Section(ctk.CTkFrame):
     def __init__(self, master, title: str, **kwargs):
-        super().__init__(master, fg_color=PANEL, corner_radius=12, border_width=1, border_color="#D5E0DB", **kwargs)
+        super().__init__(master, fg_color=PANEL, corner_radius=10, border_width=1, border_color="#D5E0DB", **kwargs)
+        self._last_text = None
         self.title = ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=15, weight="bold"), text_color=ACCENT_DEEP)
-        self.title.pack(anchor="w", padx=14, pady=(12, 6))
-        self.body = ctk.CTkLabel(
+        self.title.pack(anchor="w", padx=14, pady=(12, 4))
+        # Textbox is much cheaper to update than multi-line CTkLabel during scroll.
+        self.body = ctk.CTkTextbox(
             self,
-            text="Loading…",
-            justify="left",
-            anchor="nw",
-            font=ctk.CTkFont(family="monospace", size=12),
+            height=120,
+            activate_scrollbars=False,
+            font=ctk.CTkFont(family="Consolas", size=12),
             text_color=INK,
+            fg_color=PANEL,
+            border_width=0,
+            wrap="word",
         )
-        self.body.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        self.body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.body.insert("1.0", "Loading…")
+        self.body.configure(state="disabled")
+
+    def set_height(self, px: int) -> None:
+        self.body.configure(height=px)
 
     def set_text(self, text: str) -> None:
-        self.body.configure(text=text)
+        if text == self._last_text:
+            return
+        self._last_text = text
+        self.body.configure(state="normal")
+        self.body.delete("1.0", "end")
+        self.body.insert("1.0", text)
+        self.body.configure(state="disabled")
 
 
 class SpecForgeApp(ctk.CTk):
@@ -81,8 +102,12 @@ class SpecForgeApp(ctk.CTk):
         self.collector = SpecsCollector()
         self._lock = threading.Lock()
         self._latest: Snapshot | None = None
+        self._dirty = False
         self._running = True
         self._paused = False
+        self._error: str | None = None
+        self._last_rendered_at: float | None = None
+        self._scroll_until = 0.0
 
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("green")
@@ -94,11 +119,12 @@ class SpecForgeApp(ctk.CTk):
 
         self._build_header()
         self._build_body()
+        self._bind_scroll_pause()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._worker = threading.Thread(target=self._collect_loop, daemon=True)
         self._worker.start()
-        self.after(200, self._ui_tick)
+        self.after(150, self._ui_tick)
 
     def _build_header(self) -> None:
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -142,32 +168,59 @@ class SpecForgeApp(ctk.CTk):
         self.mem_meter.pack(fill="x", padx=20, pady=(2, 8))
 
     def _build_body(self) -> None:
-        container = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        container.pack(fill="both", expand=True, padx=12, pady=(0, 16))
-        container.grid_columnconfigure((0, 1), weight=1, uniform="cols")
+        self.container = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.container.pack(fill="both", expand=True, padx=12, pady=(0, 16))
+        self.container.grid_columnconfigure((0, 1), weight=1, uniform="cols")
 
-        self.sec_system = Section(container, "System")
+        self.sec_system = Section(self.container, "System")
+        self.sec_system.set_height(110)
         self.sec_system.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-        self.sec_cpu = Section(container, "CPU / Cores")
+        self.sec_cpu = Section(self.container, "CPU / Cores")
+        self.sec_cpu.set_height(170)
         self.sec_cpu.grid(row=0, column=1, sticky="nsew", padx=8, pady=8)
 
-        self.sec_mem = Section(container, "Memory & Swap")
+        self.sec_mem = Section(self.container, "Memory & Swap")
+        self.sec_mem.set_height(90)
         self.sec_mem.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
-        self.sec_disk = Section(container, "Disks & I/O")
+        self.sec_disk = Section(self.container, "Disks & I/O")
+        self.sec_disk.set_height(120)
         self.sec_disk.grid(row=1, column=1, sticky="nsew", padx=8, pady=8)
 
-        self.sec_gpu = Section(container, "GPU / CUDA")
+        self.sec_gpu = Section(self.container, "GPU / CUDA")
+        self.sec_gpu.set_height(150)
         self.sec_gpu.grid(row=2, column=0, sticky="nsew", padx=8, pady=8)
-        self.sec_power = Section(container, "PSU / Power")
+        self.sec_power = Section(self.container, "PSU / Power")
+        self.sec_power.set_height(120)
         self.sec_power.grid(row=2, column=1, sticky="nsew", padx=8, pady=8)
 
-        self.sec_net = Section(container, "Network")
+        self.sec_net = Section(self.container, "Network")
+        self.sec_net.set_height(140)
         self.sec_net.grid(row=3, column=0, sticky="nsew", padx=8, pady=8)
-        self.sec_temp = Section(container, "Temperatures")
+        self.sec_temp = Section(self.container, "Temperatures")
+        self.sec_temp.set_height(120)
         self.sec_temp.grid(row=3, column=1, sticky="nsew", padx=8, pady=8)
 
-        self.sec_proc = Section(container, "Top processes")
+        self.sec_proc = Section(self.container, "Top processes")
+        self.sec_proc.set_height(160)
         self.sec_proc.grid(row=4, column=0, columnspan=2, sticky="nsew", padx=8, pady=8)
+
+    def _bind_scroll_pause(self) -> None:
+        """While the user scrolls, skip heavy panel redraws so scrolling stays smooth."""
+
+        def mark_scroll(_event=None) -> None:
+            self._scroll_until = time.monotonic() + 0.35
+
+        # Mouse wheel (Windows/macOS/Linux variants)
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind_all(seq, mark_scroll, add="+")
+        # Trackpad / scrollbar drag on the scrollable frame canvas when available
+        try:
+            canvas = self.container._parent_canvas  # noqa: SLF001 - CTk internal
+            canvas.bind("<ButtonPress-1>", mark_scroll, add="+")
+            canvas.bind("<B1-Motion>", mark_scroll, add="+")
+            canvas.bind("<MouseWheel>", mark_scroll, add="+")
+        except Exception:
+            pass
 
     def _toggle_pause(self) -> None:
         self._paused = not self._paused
@@ -180,27 +233,45 @@ class SpecForgeApp(ctk.CTk):
                     snap = self.collector.collect()
                     with self._lock:
                         self._latest = snap
+                        self._dirty = True
+                        self._error = None
                 except Exception as exc:  # noqa: BLE001 - surface in UI
                     with self._lock:
                         self._latest = None
-                    self._error = str(exc)
+                        self._dirty = True
+                        self._error = str(exc)
             time.sleep(self.refresh_ms / 1000.0)
 
     def _ui_tick(self) -> None:
+        scrolling = time.monotonic() < self._scroll_until
         with self._lock:
+            dirty = self._dirty
             snap = self._latest
-        if snap is not None:
-            self._render(snap)
-        elif getattr(self, "_error", None):
-            self.status.configure(text=f"Collector error: {self._error}")
-        if self._running:
-            self.after(250, self._ui_tick)
+            err = self._error
+            if dirty and not scrolling:
+                self._dirty = False
 
-    def _render(self, snap: Snapshot) -> None:
+        if err and snap is None:
+            self.status.configure(text=f"Collector error: {err}")
+        elif snap is not None:
+            # Always keep header meters snappy; defer scroll content while scrolling.
+            self._render_header(snap)
+            if not scrolling and dirty and snap.collected_at != self._last_rendered_at:
+                self._render_panels(snap)
+                self._last_rendered_at = snap.collected_at
+            elif scrolling and dirty:
+                # Keep the dirty flag so panels catch up after scrolling stops.
+                with self._lock:
+                    self._dirty = True
+
+        if self._running:
+            # ~10 FPS UI scheduler is enough; data itself arrives ~1 Hz.
+            self.after(100, self._ui_tick)
+
+    def _render_header(self, snap: Snapshot) -> None:
         stamp = datetime.fromtimestamp(snap.collected_at).strftime("%H:%M:%S")
         state = "Paused" if self._paused else "Live"
         self.status.configure(text=f"{state} · updated {stamp}")
-
         self.cpu_meter.update_meter(
             snap.cpu.get("usage_percent"),
             f"{snap.cpu.get('usage_percent', 0):.1f}%",
@@ -210,6 +281,7 @@ class SpecForgeApp(ctk.CTk):
             f"{snap.memory.get('used')} / {snap.memory.get('total')} ({snap.memory.get('percent')}%)",
         )
 
+    def _render_panels(self, snap: Snapshot) -> None:
         sys = snap.system
         self.sec_system.set_text(
             "\n".join(
@@ -226,8 +298,9 @@ class SpecForgeApp(ctk.CTk):
         cores = snap.cpu.get("per_core_percent") or []
         core_lines = []
         for i, pct in enumerate(cores):
-            bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
-            core_lines.append(f"Core {i:02d}  {bar}  {pct:5.1f}%")
+            filled = min(10, max(0, int(pct // 10)))
+            bar = "#" * filled + "-" * (10 - filled)
+            core_lines.append(f"Core {i:02d}  [{bar}]  {pct:5.1f}%")
         load = snap.cpu.get("load_avg") or []
         load_txt = " / ".join(f"{x:.2f}" for x in load) if load else "n/a"
         self.sec_cpu.set_text(
@@ -278,7 +351,7 @@ class SpecForgeApp(ctk.CTk):
                             f"  Driver     {g.get('driver')}",
                             f"  VRAM       {g.get('memory_used_mb')} / {g.get('memory_total_mb')} MB",
                             f"  GPU util   {g.get('util_gpu_percent')}% · mem util {g.get('util_mem_percent')}%",
-                            f"  Temp       {g.get('temp_c')} °C",
+                            f"  Temp       {g.get('temp_c')} C",
                             f"  Power      {g.get('power_draw_w')} W / {g.get('power_limit_w')} W",
                             f"  Clocks     SM {g.get('clock_sm_mhz')} · MEM {g.get('clock_mem_mhz')} MHz",
                         ]
@@ -289,7 +362,7 @@ class SpecForgeApp(ctk.CTk):
             gpu_lines.extend(
                 [
                     "",
-                    f"CUDA toolkit {'detected — ' + str(cuda.get('nvcc_version')) if cuda.get('toolkit_detected') else 'not detected'}",
+                    f"CUDA toolkit {'detected - ' + str(cuda.get('nvcc_version')) if cuda.get('toolkit_detected') else 'not detected'}",
                 ]
             )
             if cuda.get("note") and not cuda.get("toolkit_detected"):
@@ -309,7 +382,7 @@ class SpecForgeApp(ctk.CTk):
 
         net_lines = []
         io = snap.net_io or {}
-        net_lines.append(f"Throughput   ↓ {io.get('recv_human_s', 'n/a')}  ↑ {io.get('sent_human_s', 'n/a')}")
+        net_lines.append(f"Throughput   down {io.get('recv_human_s', 'n/a')}  up {io.get('sent_human_s', 'n/a')}")
         net_lines.append("")
         for n in snap.network[:12]:
             up = "up" if n.get("isup") else "down"
@@ -317,7 +390,7 @@ class SpecForgeApp(ctk.CTk):
         self.sec_net.set_text("\n".join(net_lines))
 
         if snap.temperatures:
-            temp_lines = [f"{t['label']}: {t['current_c']:.1f} °C" for t in snap.temperatures[:16]]
+            temp_lines = [f"{t['label']}: {t['current_c']:.1f} C" for t in snap.temperatures[:16]]
             self.sec_temp.set_text("\n".join(temp_lines))
         else:
             self.sec_temp.set_text("No temperature sensors exposed on this host.")

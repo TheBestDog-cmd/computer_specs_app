@@ -270,6 +270,8 @@ class SpecsCollector:
         self._prev_net = psutil.net_io_counters()
         self._prev_disk = psutil.disk_io_counters()
         self._prev_time = time.time()
+        self._cached_procs: list[dict[str, Any]] = []
+        self._procs_at = 0.0
         # Prime CPU percent
         psutil.cpu_percent(interval=None)
         psutil.cpu_percent(interval=None, percpu=True)
@@ -404,22 +406,26 @@ class SpecsCollector:
                 }
             ]
 
-        # Top processes by CPU then memory
-        procs = []
-        for proc in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent"]):
-            try:
-                info = proc.info
-                procs.append(
-                    {
-                        "pid": info.get("pid"),
-                        "name": info.get("name") or "?",
-                        "cpu_percent": info.get("cpu_percent") or 0.0,
-                        "memory_percent": info.get("memory_percent") or 0.0,
-                    }
-                )
-            except (psutil.Error, TypeError):
-                continue
-        procs.sort(key=lambda p: (p["cpu_percent"], p["memory_percent"]), reverse=True)
+        # Top processes are relatively expensive on Windows; refresh every ~2s.
+        if now - self._procs_at >= 2.0 or not self._cached_procs:
+            procs = []
+            for proc in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent"]):
+                try:
+                    info = proc.info
+                    procs.append(
+                        {
+                            "pid": info.get("pid"),
+                            "name": info.get("name") or "?",
+                            "cpu_percent": info.get("cpu_percent") or 0.0,
+                            "memory_percent": info.get("memory_percent") or 0.0,
+                        }
+                    )
+                except (psutil.Error, TypeError):
+                    continue
+            procs.sort(key=lambda p: (p["cpu_percent"], p["memory_percent"]), reverse=True)
+            self._cached_procs = procs[:8]
+            self._procs_at = now
+        procs = self._cached_procs
 
         self._prev_time = now
         return Snapshot(
@@ -465,7 +471,7 @@ class SpecsCollector:
             cuda=_cuda_toolkit(),
             power=_power_supply(),
             temperatures=_temperatures(),
-            processes_top=procs[:8],
+            processes_top=list(procs),
         )
 
 
