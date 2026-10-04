@@ -893,7 +893,11 @@ class UpdatesDialog(ctk.CTkToplevel):
                 result, should_restart = updater.apply_update(__version__)
                 msg = result
                 if should_restart:
-                    msg += "\n\nClosing SpecForge so the new exe can start…"
+                    msg += (
+                        "\n\nClosing SpecForge so the new exe can install.\n"
+                        "It should reopen in about 12 seconds.\n"
+                        "If a Python DLL error appears, close it and use the Desktop shortcut."
+                    )
                 else:
                     msg += "\n\nRestart SpecForge to load code changes."
             except Exception as exc:  # noqa: BLE001

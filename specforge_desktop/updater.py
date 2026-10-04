@@ -587,7 +587,38 @@ def _windows_update_ps1(
 
     stale_cmd_pat = r"^(cmd|wscript|cscript)\.exe$"
     stale_line_pat = r"_specforge_update\.bat|SpecForge\.exe\.new"
-    extract_dir = str((exe_path.parent / "tmp").resolve()).replace("'", "''")
+    extract_raw = str((exe_path.parent / "tmp").resolve())
+    extract_dir = extract_raw.replace("'", "''")
+    relaunch_path = exe_path.parent / "_specforge_relaunch.cmd"
+    relaunch_log_path = exe_path.parent / "_specforge_relaunch.log"
+    relaunch_lit = str(relaunch_path).replace("'", "''")
+
+    # Immediate Start-Process of SpecForge.exe races Defender/_MEI and shows
+    # "Failed to load Python DLL" even though the update already landed.
+    # Write a delayed starter now; the PS swap script only schedules it.
+    relaunch_path.write_text(
+        "\r\n".join(
+            [
+                "@echo off",
+                "setlocal",
+                f'echo %DATE% %TIME% delayed relaunch begin>>"{relaunch_log_path}"',
+                "timeout /t 12 /nobreak >nul",
+                f'set "TEMP={extract_raw}"',
+                f'set "TMP={extract_raw}"',
+                'if not exist "%TEMP%" mkdir "%TEMP%" >nul 2>&1',
+                'for /d %%D in ("%TEMP%\\_MEI*") do rd /s /q "%%D" >nul 2>&1',
+                'for /d %%D in ("%TMP%\\_MEI*") do rd /s /q "%%D" >nul 2>&1',
+                'for /d %%D in ("%LOCALAPPDATA%\\Temp\\_MEI*") do rd /s /q "%%D" >nul 2>&1',
+                f'echo %DATE% %TIME% starting exe>>"{relaunch_log_path}"',
+                f'start "" /D "{exe_path.parent}" "{exe_path}"',
+                "timeout /t 2 /nobreak >nul",
+                'del "%~f0" >nul 2>&1',
+                "",
+            ]
+        ),
+        encoding="ascii",
+        newline="\r\n",
+    )
 
     ps = f"""$ErrorActionPreference = 'Continue'
 $exe = '{exe_lit}'
@@ -595,6 +626,7 @@ $new = '{new_lit}'
 $log = '{log_lit}'
 $dir = '{dir_lit}'
 $extractRoot = '{extract_dir}'
+$relaunch = '{relaunch_lit}'
 $pidToWait = {int(pid)}
 function Log([string]$msg) {{
   $line = "{{0}} {{1}}" -f (Get-Date -Format o), $msg
@@ -715,40 +747,20 @@ try {{
   Remove-Item -LiteralPath ($exe + ':Zone.Identifier') -Force -ErrorAction SilentlyContinue
 }} catch {{}}
 
-# Nudge Explorer / Defender to finish touching the new file before we launch.
 try {{ (Get-Item -LiteralPath $exe).LastWriteTime = Get-Date }} catch {{}}
-Start-Sleep -Seconds 4
+Start-Sleep -Seconds 3
+Clear-MeiDirs $env:TEMP
+Clear-MeiDirs $env:TMP
+Clear-MeiDirs $extractRoot
 
-Log "Launching $exe (private TEMP=$extractRoot)"
-$env:SPEC_FORGE_UPDATED = '1'
-$env:TEMP = $extractRoot
-$env:TMP = $extractRoot
-
-$launched = $false
-for ($t = 0; $t -lt 5; $t++) {{
-  Clear-MeiDirs $extractRoot
-  try {{
-    $p = Start-Process -FilePath $exe -WorkingDirectory $dir -PassThru
-    Log ("Start-Process attempt $($t+1) PID=$($p.Id)")
-    Start-Sleep -Seconds 4
-    $p.Refresh()
-    if (-not $p.HasExited) {{
-      Log "Launch appears healthy"
-      $launched = $true
-      break
-    }}
-    Log ("Process exited early code=$($p.ExitCode); retrying after MEI cleanup")
-  }} catch {{
-    Log "Launch failed: $_"
-  }}
-  Start-Sleep -Seconds 2
+if (-not (Test-Path -LiteralPath $relaunch)) {{
+  Log "Missing delayed relaunch helper: $relaunch"
+  exit 1
 }}
+Log "Scheduling delayed relaunch via $relaunch (12s) — no immediate SpecForge Start-Process"
+Start-Process -FilePath "$env:SystemRoot\\System32\\cmd.exe" -ArgumentList @('/c', "`"$relaunch`"") -WindowStyle Hidden -WorkingDirectory $dir
+Log "Delayed relaunch helper started"
 
-if (-not $launched) {{
-  Log "WARNING: could not confirm a healthy SpecForge relaunch"
-}}
-
-# Self-delete when possible
 Start-Sleep -Seconds 1
 Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 exit 0
@@ -877,10 +889,11 @@ def download_and_replace_exe(
     _launch_silent_updater(script, exe.parent)
     return (
         "Downloaded the latest SpecForge build from GitHub Releases.\n"
-        "SpecForge will close and restart quietly with the new build "
-        "(no terminal windows).\n"
-        "If launch fails, see _specforge_update.log next to SpecForge.exe, "
-        "delete %TEMP%\\_MEI* folders, and try again."
+        "SpecForge will close so the new build can be installed.\n"
+        "It should reopen automatically after a short delay.\n"
+        "If it does not (or you see a Python DLL error), ignore it and open "
+        "SpecForge from your Desktop shortcut — the update is already installed.\n"
+        "If launch fails repeatedly, see _specforge_update.log next to SpecForge.exe."
     )
 
 

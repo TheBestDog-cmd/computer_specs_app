@@ -209,13 +209,38 @@ def relaunch_from_app_install_if_needed() -> bool:
     except Exception:
         pass
 
+    # Delay the first launch of the installed onefile exe. Starting it in the
+    # same second as the Setup process exits races PyInstaller _MEI extracts
+    # ("Failed to load Python DLL").
     try:
+        extract = _install_dir() / "tmp"
+        extract.mkdir(parents=True, exist_ok=True)
+        relaunch = _install_dir() / "_specforge_relaunch.cmd"
+        relaunch.write_text(
+            "\r\n".join(
+                [
+                    "@echo off",
+                    "setlocal",
+                    "timeout /t 8 /nobreak >nul",
+                    f'set "TEMP={extract}"',
+                    f'set "TMP={extract}"',
+                    'if not exist "%TEMP%" mkdir "%TEMP%" >nul 2>&1',
+                    'for /d %%D in ("%TEMP%\\_MEI*") do rd /s /q "%%D" >nul 2>&1',
+                    f'start "" /D "{dest.parent}" "{dest}"',
+                    "timeout /t 1 /nobreak >nul",
+                    'del "%~f0" >nul 2>&1',
+                    "",
+                ]
+            ),
+            encoding="ascii",
+            newline="\r\n",
+        )
         flags = 0
         flags |= getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
         flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
         flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         subprocess.Popen(
-            [str(dest)],
+            ["cmd.exe", "/c", str(relaunch)],
             cwd=str(dest.parent),
             close_fds=True,
             creationflags=flags,
@@ -324,6 +349,9 @@ def cleanup_stale_update_helpers() -> None:
             "_specforge_update.cmd",
             "_specforge_update.ps1",
             "_specforge_update.vbs",
+            "_specforge_relaunch.cmd",
+            "_specforge_relaunch.log",
+            "_specforge_update.log",
         ):
             path = folder / name
             try:

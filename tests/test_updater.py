@@ -188,8 +188,13 @@ def test_windows_replace_script_contains_settle_and_copy(tmp_path):
     assert "Stop-Process -Name 'SpecForge'" in body
     assert "_MEI*" in body
     assert "Move-Item" in body
-    assert "Start-Process" in body
-    assert "Zone.Identifier" in body
-    assert "extractRoot" in body
+    assert "_specforge_relaunch.cmd" in body
+    assert "delayed relaunch" in body.lower() or "Delayed relaunch" in body
+    # Must not immediately Start-Process the SpecForge exe (DLL race).
+    assert "Start-Process -FilePath $exe" not in body
+    assert (tmp_path / "_specforge_relaunch.cmd").exists()
+    relaunch = (tmp_path / "_specforge_relaunch.cmd").read_text(encoding="ascii")
+    assert "timeout /t 12" in relaunch
+    assert "SpecForge.exe" in relaunch
     assert "tasklist" not in body
     assert ":wait_proc" not in body
