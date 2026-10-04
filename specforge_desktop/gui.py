@@ -688,11 +688,13 @@ class UpdatesDialog(ctk.CTkToplevel):
         self.check_btn.pack(side="left")
         self.pull_btn = ctk.CTkButton(row, text="Update now", width=120, fg_color="#2F5D62", hover_color=ACCENT_DEEP, command=self._pull)
         self.pull_btn.pack(side="left", padx=8)
+        self.pull_btn.configure(state="disabled")
         self.web_btn = ctk.CTkButton(row, text="Open GitHub", width=120, fg_color="#3D6B74", hover_color=ACCENT_DEEP, command=lambda: updater.open_github())
         self.web_btn.pack(side="left")
         self.releases_btn = ctk.CTkButton(row, text="Releases", width=100, fg_color="#3D6B74", hover_color=ACCENT_DEEP, command=updater.open_releases)
         self.releases_btn.pack(side="left", padx=8)
 
+        self._latest_info: updater.UpdateInfo | None = None
         self.after(100, self._check)
 
     def _set_info(self, text: str) -> None:
@@ -701,38 +703,54 @@ class UpdatesDialog(ctk.CTkToplevel):
         self.info.insert("1.0", text)
         self.info.configure(state="disabled")
 
+    def _set_update_enabled(self, enabled: bool) -> None:
+        self.pull_btn.configure(state="normal" if enabled else "disabled")
+
     def _busy(self, busy: bool) -> None:
         state = "disabled" if busy else "normal"
-        for btn in (self.check_btn, self.pull_btn, self.web_btn, self.releases_btn):
-            btn.configure(state=state)
+        self.check_btn.configure(state=state)
+        self.web_btn.configure(state=state)
+        self.releases_btn.configure(state=state)
+        if busy:
+            self.pull_btn.configure(state="disabled")
+        else:
+            allowed = bool(self._latest_info and self._latest_info.update_available)
+            self._set_update_enabled(allowed)
 
     def _check(self) -> None:
         self._busy(True)
         self._set_info(f"App version: {__version__}\nChecking GitHub…")
 
         def work():
+            info_obj: updater.UpdateInfo | None = None
             try:
-                info = updater.check_for_updates(__version__)
+                info_obj = updater.check_for_updates(__version__)
                 lines = [
-                    f"App version     {info.local_version}",
-                    f"Install mode    {info.mode}",
-                    f"Local commit    {info.local_commit or 'unknown'}",
-                    f"GitHub commit   {info.remote_commit or 'unknown'}",
-                    f"Commit date     {info.remote_date or 'n/a'}",
-                    f"Commit message  {info.remote_message or 'n/a'}",
-                    f"Release tag     {info.release_tag or 'none yet'}",
+                    f"App version     {info_obj.local_version}",
+                    f"GitHub version  {info_obj.remote_version or 'unknown'}",
+                    f"Install mode    {info_obj.mode}",
+                    f"Local commit    {info_obj.local_commit or 'unknown'}",
+                    f"GitHub commit   {info_obj.remote_commit or 'unknown'}",
+                    f"Commit date     {info_obj.remote_date or 'n/a'}",
+                    f"Commit message  {info_obj.remote_message or 'n/a'}",
+                    f"Release tag     {info_obj.release_tag or 'none yet'}",
                     "",
-                    ("UPDATE AVAILABLE" if info.update_available else "UP TO DATE"),
-                    info.detail,
+                    ("UPDATE AVAILABLE" if info_obj.update_available else "UP TO DATE"),
+                    info_obj.detail,
                     "",
-                    "Pull update uses git pull when this folder is a git checkout,",
-                    "otherwise it downloads the latest source ZIP from GitHub.",
-                    "After updating source, rebuild the Windows exe if you use SpecForge.exe.",
+                    "Update now is enabled only when a newer version is available.",
+                    "Exe installs compare version.json from GitHub Releases;",
+                    "git checkouts can also update when main has a newer commit.",
                 ]
                 msg = "\n".join(lines)
             except Exception as exc:  # noqa: BLE001
                 msg = f"Could not check GitHub:\n{exc}"
-            self.after(0, lambda: self._done(msg))
+
+            def finish():
+                self._latest_info = info_obj
+                self._done(msg)
+
+            self.after(0, finish)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -741,23 +759,36 @@ class UpdatesDialog(ctk.CTkToplevel):
         self._busy(False)
 
     def _pull(self) -> None:
+        if not (self._latest_info and self._latest_info.update_available):
+            self._set_info(
+                f"App version: {__version__}\n\n"
+                "No newer version is available.\n"
+                "Click Check again after a new SpecForge release is published."
+            )
+            self._set_update_enabled(False)
+            return
+
         self._busy(True)
         self._set_info("Pulling latest from GitHub…")
 
         def work():
             try:
-                result, should_restart = updater.apply_update()
+                result, should_restart = updater.apply_update(__version__)
                 msg = result
                 if should_restart:
                     msg += "\n\nClosing SpecForge so the new exe can start…"
                 else:
                     msg += "\n\nRestart SpecForge to load code changes."
             except Exception as exc:  # noqa: BLE001
-                result = None
                 should_restart = False
                 msg = f"Update failed:\n{exc}"
 
             def finish():
+                # Re-check so Update now stays disabled once we're current.
+                try:
+                    self._latest_info = updater.check_for_updates(__version__)
+                except Exception:
+                    self._latest_info = None
                 self._done(msg)
                 if should_restart:
                     # Give the UI a moment to show the message, then exit for the swap script.

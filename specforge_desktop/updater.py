@@ -23,9 +23,33 @@ REPO_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}"
 API_COMMIT = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/commits/{GITHUB_BRANCH}"
 API_RELEASE = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 ZIPBALL_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
-USER_AGENT = "SpecForge-Updater/1.2"
+USER_AGENT = "SpecForge-Updater/1.3"
 EXE_ASSET_NAME = "SpecForge.exe"
 VERSION_ASSET_NAME = "version.json"
+
+
+def parse_version(value: str | None) -> tuple[int, ...]:
+    """Parse a dotted version like 1.3.3 into a comparable tuple."""
+    if not value:
+        return ()
+    parts: list[int] = []
+    for token in str(value).strip().lstrip("vV").split("."):
+        digits = "".join(ch for ch in token if ch.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
+def is_newer_version(remote: str | None, local: str | None) -> bool:
+    """True when remote version is strictly greater than local."""
+    r = parse_version(remote)
+    l = parse_version(local)
+    if not r:
+        return False
+    if not l:
+        return True
+    return r > l
 
 
 @dataclass
@@ -191,7 +215,15 @@ def check_for_updates(local_version: str) -> UpdateInfo:
             except Exception:
                 pass
 
-    if remote and local:
+    if remote_version:
+        available = is_newer_version(remote_version, local_version)
+        detail = (
+            f"A newer version is available ({remote_version} > {local_version})."
+            if available
+            else f"You are up to date (installed {local_version}; GitHub {remote_version})."
+        )
+    elif remote and local:
+        # Source/git installs may not publish version.json yet — fall back to commits.
         available = remote.lower() != local.lower()
         detail = (
             "A newer build is on GitHub."
@@ -199,17 +231,37 @@ def check_for_updates(local_version: str) -> UpdateInfo:
             else "You are up to date with GitHub."
         )
     elif remote and not local:
-        available = True
-        detail = "Local build marker missing; GitHub has a published build/commit available."
+        # Without a local commit marker, only offer an update when a newer version is known.
+        available = is_newer_version(remote_version, local_version) if remote_version else False
+        detail = (
+            f"GitHub publishes version {remote_version}; this install has no local commit marker."
+            if available
+            else "Local build marker missing; cannot confirm a newer version is available."
+        )
     else:
         available = False
         detail = "Could not read the latest GitHub commit/release."
 
     if mode == "exe":
-        if can_update_exe:
-            detail += " Pull update will download SpecForge.exe and replace this app on restart."
+        # Frozen installs only update when a newer version.json + SpecForge.exe exist.
+        if remote_version:
+            available = is_newer_version(remote_version, local_version)
         else:
-            detail += " No SpecForge.exe release asset found yet (CI may still be publishing)."
+            available = False
+            detail = (
+                "No version.json in the latest GitHub Release yet, so SpecForge cannot confirm "
+                "a newer version. Wait for CI to publish, then Check again."
+            )
+        if available and can_update_exe:
+            detail += " Update now will download SpecForge.exe and replace this app on restart."
+        elif available and not can_update_exe:
+            available = False
+            detail = (
+                f"Version {remote_version} is listed, but SpecForge.exe is not in the latest "
+                "release assets yet (CI may still be publishing)."
+            )
+        elif can_update_exe and not available:
+            detail += " Update now stays disabled until a newer version is published."
     elif release_tag:
         detail += f" Latest release tag: {release_tag}."
 
@@ -226,7 +278,7 @@ def check_for_updates(local_version: str) -> UpdateInfo:
         detail=detail,
         exe_asset_url=exe_url,
         remote_version=remote_version,
-        can_update_exe=can_update_exe,
+        can_update_exe=can_update_exe and available,
     )
 
 
@@ -344,7 +396,14 @@ def download_and_replace_exe(
         raise RuntimeError("Not running as a frozen SpecForge.exe.")
 
     if not asset_url:
-        info = check_for_updates("0")
+        from specforge_desktop import __version__ as installed_version
+
+        info = check_for_updates(installed_version)
+        if not info.update_available:
+            raise RuntimeError(
+                info.detail
+                or "Already up to date — no newer SpecForge version is available."
+            )
         asset_url = info.exe_asset_url
         remote_commit = remote_commit or info.remote_commit
         if not asset_url:
@@ -375,14 +434,26 @@ def download_and_replace_exe(
     )
 
 
-def apply_update(progress: Callable[[int, int | None], None] | None = None) -> tuple[str, bool]:
-    """Apply update.
+def apply_update(
+    local_version: str | None = None,
+    progress: Callable[[int, int | None], None] | None = None,
+) -> tuple[str, bool]:
+    """Apply update only when a newer version/build is available.
 
     Returns (message, should_restart_app).
     """
-    mode = detect_mode()
+    from specforge_desktop import __version__ as installed_version
+
+    version = local_version or installed_version
+    info = check_for_updates(version)
+    if not info.update_available:
+        raise RuntimeError(
+            info.detail
+            or "Already up to date — Update now is only allowed when a newer version is available."
+        )
+
+    mode = info.mode
     if mode == "exe":
-        info = check_for_updates("0")
         if info.can_update_exe and info.exe_asset_url:
             msg = download_and_replace_exe(
                 info.exe_asset_url,
@@ -390,7 +461,10 @@ def apply_update(progress: Callable[[int, int | None], None] | None = None) -> t
                 progress=progress,
             )
             return msg, True
-        return download_source_update(), False
+        raise RuntimeError(
+            "A newer version is listed, but SpecForge.exe is not downloadable yet. "
+            "Wait for the GitHub Release workflow, then try again."
+        )
     if mode == "git":
         return pull_with_git(), False
     return download_source_update(), False
