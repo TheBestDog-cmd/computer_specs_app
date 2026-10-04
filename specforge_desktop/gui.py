@@ -187,7 +187,15 @@ class SpecForgeApp(ctk.CTk):
         self.cpu_meter = MeterRow(self, "CPU usage")
         self.cpu_meter.pack(fill="x", padx=20, pady=(4, 2))
         self.mem_meter = MeterRow(self, "Memory usage")
-        self.mem_meter.pack(fill="x", padx=20, pady=(2, 8))
+        self.mem_meter.pack(fill="x", padx=20, pady=(2, 2))
+
+        temps = ctk.CTkFrame(self, fg_color="transparent")
+        temps.pack(fill="x", padx=20, pady=(2, 8))
+        temps.grid_columnconfigure((0, 1), weight=1, uniform="temps")
+        self.cpu_temp_meter = MeterRow(temps, "CPU temperature")
+        self.cpu_temp_meter.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.gpu_temp_meter = MeterRow(temps, "GPU temperature")
+        self.gpu_temp_meter.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
     def _build_body(self) -> None:
         self.container = ctk.CTkScrollableFrame(self, fg_color="transparent")
@@ -209,18 +217,18 @@ class SpecForgeApp(ctk.CTk):
         self.sec_disk.grid(row=1, column=1, sticky="nsew", padx=8, pady=8)
 
         self.sec_gpu = Section(self.container, "GPU / CUDA")
-        self.sec_gpu.set_height(150)
+        self.sec_gpu.set_height(160)
         self.sec_gpu.grid(row=2, column=0, sticky="nsew", padx=8, pady=8)
-        self.sec_power = Section(self.container, "PSU / Power")
-        self.sec_power.set_height(120)
-        self.sec_power.grid(row=2, column=1, sticky="nsew", padx=8, pady=8)
+        self.sec_temp = Section(self.container, "Temperatures")
+        self.sec_temp.set_height(160)
+        self.sec_temp.grid(row=2, column=1, sticky="nsew", padx=8, pady=8)
 
         self.sec_net = Section(self.container, "Network")
         self.sec_net.set_height(140)
         self.sec_net.grid(row=3, column=0, sticky="nsew", padx=8, pady=8)
-        self.sec_temp = Section(self.container, "Temperatures")
-        self.sec_temp.set_height(120)
-        self.sec_temp.grid(row=3, column=1, sticky="nsew", padx=8, pady=8)
+        self.sec_power = Section(self.container, "PSU / Power")
+        self.sec_power.set_height(120)
+        self.sec_power.grid(row=3, column=1, sticky="nsew", padx=8, pady=8)
 
         self.sec_proc = Section(self.container, "Top processes")
         self.sec_proc.set_height(160)
@@ -290,6 +298,14 @@ class SpecForgeApp(ctk.CTk):
             # ~10 FPS UI scheduler is enough; data itself arrives ~1 Hz.
             self.after(100, self._ui_tick)
 
+    @staticmethod
+    def _temp_meter_values(temp_c: float | None) -> tuple[float | None, str]:
+        if temp_c is None:
+            return None, "unavailable"
+        # Map typical 30–95 C operating range onto the progress bar.
+        pct = max(0.0, min(100.0, (float(temp_c) - 30.0) * (100.0 / 65.0)))
+        return pct, f"{float(temp_c):.1f} C"
+
     def _render_header(self, snap: Snapshot) -> None:
         stamp = datetime.fromtimestamp(snap.collected_at).strftime("%H:%M:%S")
         state = "Paused" if self._paused else "Live"
@@ -302,6 +318,13 @@ class SpecForgeApp(ctk.CTk):
             snap.memory.get("percent"),
             f"{snap.memory.get('used')} / {snap.memory.get('total')} ({snap.memory.get('percent')}%)",
         )
+        status = snap.temperature_status or {}
+        cpu_temp = status.get("cpu_c", snap.cpu.get("temp_c"))
+        gpu_temp = status.get("gpu_c")
+        cpu_pct, cpu_label = self._temp_meter_values(cpu_temp)
+        gpu_pct, gpu_label = self._temp_meter_values(gpu_temp)
+        self.cpu_temp_meter.update_meter(cpu_pct, cpu_label)
+        self.gpu_temp_meter.update_meter(gpu_pct, gpu_label)
 
     def _render_panels(self, snap: Snapshot) -> None:
         sys = snap.system
@@ -325,12 +348,15 @@ class SpecForgeApp(ctk.CTk):
             core_lines.append(f"Core {i:02d}  [{bar}]  {pct:5.1f}%")
         load = snap.cpu.get("load_avg") or []
         load_txt = " / ".join(f"{x:.2f}" for x in load) if load else "n/a"
+        cpu_temp = snap.cpu.get("temp_c")
+        cpu_temp_txt = f"{cpu_temp:.1f} C" if isinstance(cpu_temp, (int, float)) else "unavailable"
         self.sec_cpu.set_text(
             "\n".join(
                 [
                     f"Model        {snap.cpu.get('model')}",
                     f"Cores        {snap.cpu.get('physical_cores')} physical · {snap.cpu.get('logical_cores')} logical",
                     f"Frequency    {snap.cpu.get('freq_current_mhz') or 'n/a'} MHz (max {snap.cpu.get('freq_max_mhz') or 'n/a'})",
+                    f"CPU temp     {cpu_temp_txt}",
                     f"Load avg     {load_txt}",
                     "",
                     *core_lines,
@@ -367,19 +393,23 @@ class SpecForgeApp(ctk.CTk):
             gpu_lines = []
             for g in snap.gpu:
                 gpu_lines.append(f"{g.get('vendor', '?')}: {g.get('name')}")
-                if g.get("cuda_available"):
+                temp = g.get("temp_c")
+                temp_txt = f"{temp:.1f} C" if isinstance(temp, (int, float)) else "unavailable"
+                if g.get("cuda_available") or g.get("vendor") == "NVIDIA":
                     gpu_lines.extend(
                         [
+                            f"  Temp       {temp_txt}",
                             f"  Driver     {g.get('driver')}",
                             f"  VRAM       {g.get('memory_used_mb')} / {g.get('memory_total_mb')} MB",
                             f"  GPU util   {g.get('util_gpu_percent')}% · mem util {g.get('util_mem_percent')}%",
-                            f"  Temp       {g.get('temp_c')} C",
                             f"  Power      {g.get('power_draw_w')} W / {g.get('power_limit_w')} W",
                             f"  Clocks     SM {g.get('clock_sm_mhz')} · MEM {g.get('clock_mem_mhz')} MHz",
                         ]
                     )
-                elif g.get("note"):
-                    gpu_lines.append(f"  {g['note']}")
+                else:
+                    gpu_lines.append(f"  Temp       {temp_txt}")
+                    if g.get("note"):
+                        gpu_lines.append(f"  {g['note']}")
             cuda = snap.cuda or {}
             gpu_lines.extend(
                 [
@@ -411,11 +441,26 @@ class SpecForgeApp(ctk.CTk):
             net_lines.append(f"{n['name']} [{n['family']}] {n['address']} ({up})")
         self.sec_net.set_text("\n".join(net_lines))
 
+        status = snap.temperature_status or {}
+        temp_lines = [
+            f"CPU temp     {status['cpu_c']:.1f} C" if isinstance(status.get("cpu_c"), (int, float)) else "CPU temp     unavailable",
+            f"GPU temp     {status['gpu_c']:.1f} C" if isinstance(status.get("gpu_c"), (int, float)) else "GPU temp     unavailable",
+        ]
+        sources = status.get("sources") or []
+        if sources:
+            temp_lines.append(f"Sources      {', '.join(sources)}")
+        temp_lines.append("")
         if snap.temperatures:
-            temp_lines = [f"{t['label']}: {t['current_c']:.1f} C" for t in snap.temperatures[:16]]
-            self.sec_temp.set_text("\n".join(temp_lines))
-        else:
-            self.sec_temp.set_text("No temperature sensors exposed on this host.")
+            for t in snap.temperatures[:12]:
+                src = t.get("source") or t.get("sensor") or "?"
+                temp_lines.append(f"{t['label']}: {t['current_c']:.1f} C  [{src}]")
+        notes = status.get("notes") or []
+        if notes:
+            temp_lines.append("")
+            temp_lines.append("How to enable missing temps:")
+            for note in notes:
+                temp_lines.append(f"- {note}")
+        self.sec_temp.set_text("\n".join(temp_lines))
 
         proc_lines = ["PID     CPU%   MEM%   NAME", "-" * 48]
         for p in snap.processes_top:

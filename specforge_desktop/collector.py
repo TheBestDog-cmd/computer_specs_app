@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
@@ -41,13 +42,36 @@ def _run_capture(cmd: list[str], *, timeout: float = 3.0) -> str:
 
 _CUDA_CACHE: dict[str, Any] | None = None
 _NVIDIA_SMI: str | None | bool = False  # False = unset, None = missing, str = path
+_AMD_SMI: str | None | bool = False
+_WIN_TEMP_CACHE: tuple[float, list[dict[str, Any]]] | None = None
+_WIN_TEMP_TTL_SEC = 2.0
 
 
 def _nvidia_smi_path() -> str | None:
+    """Locate nvidia-smi, including common Windows install paths outside PATH."""
     global _NVIDIA_SMI
     if _NVIDIA_SMI is False:
-        _NVIDIA_SMI = shutil.which("nvidia-smi")
+        found = shutil.which("nvidia-smi")
+        if not found and platform.system() == "Windows":
+            candidates = [
+                Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "nvidia-smi.exe",
+                Path(r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"),
+                Path(r"C:\Windows\System32\nvidia-smi.exe"),
+            ]
+            for path in candidates:
+                if path.is_file():
+                    found = str(path)
+                    break
+        _NVIDIA_SMI = found
     return _NVIDIA_SMI  # type: ignore[return-value]
+
+
+def _amd_smi_path() -> str | None:
+    global _AMD_SMI
+    if _AMD_SMI is False:
+        found = shutil.which("amd-smi") or shutil.which("rocm-smi")
+        _AMD_SMI = found
+    return _AMD_SMI  # type: ignore[return-value]
 
 
 def _bytes_human(n: float | int | None) -> str:
@@ -194,6 +218,68 @@ def _cuda_toolkit() -> dict[str, Any]:
     return info
 
 
+def _gpu_amd() -> list[dict[str, Any]]:
+    """Best-effort AMD GPU metrics via amd-smi / rocm-smi when installed."""
+    smi = _amd_smi_path()
+    if not smi:
+        return []
+    name = Path(smi).name.lower()
+    gpus: list[dict[str, Any]] = []
+    try:
+        if name.startswith("amd-smi"):
+            out = _run_capture(
+                [smi, "metric", "--field", "gpu,temp,power,usage", "--format", "csv"],
+                timeout=4,
+            )
+            # Flexible CSV parse: keep any numeric temp-like field.
+            for line in out.strip().splitlines():
+                if not line or line.lower().startswith("gpu"):
+                    continue
+                parts = [p.strip() for p in line.split(",")]
+                if not parts:
+                    continue
+                temp = None
+                for part in parts[1:]:
+                    val = _num(part.replace("C", "").replace("c", "").strip())
+                    if val is not None and 0 < val < 120:
+                        temp = val
+                        break
+                gpus.append(
+                    {
+                        "vendor": "AMD",
+                        "name": parts[0] or "AMD GPU",
+                        "cuda_available": False,
+                        "temp_c": temp,
+                        "note": "AMD metrics via amd-smi (limited fields).",
+                    }
+                )
+        else:
+            out = _run_capture([smi, "--showtemp"], timeout=4)
+            temp = None
+            for line in out.splitlines():
+                lower = line.lower()
+                if "temperature" in lower or "temp" in lower:
+                    for token in line.replace("=", " ").replace(":", " ").split():
+                        val = _num(token.replace("c", "").replace("C", ""))
+                        if val is not None and 0 < val < 120:
+                            temp = val
+                            break
+                if temp is not None:
+                    break
+            gpus.append(
+                {
+                    "vendor": "AMD",
+                    "name": "AMD GPU",
+                    "cuda_available": False,
+                    "temp_c": temp,
+                    "note": "AMD temperature via rocm-smi.",
+                }
+            )
+    except (subprocess.SubprocessError, OSError):
+        return []
+    return gpus
+
+
 def _gpus_fallback() -> list[dict[str, Any]]:
     """Best-effort non-NVIDIA discovery on Linux."""
     gpus: list[dict[str, Any]] = []
@@ -224,24 +310,261 @@ def _num(value: str) -> float | None:
         return None
 
 
-def _temperatures() -> list[dict[str, Any]]:
-    rows = []
+def _psutil_temperatures() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     try:
         temps = psutil.sensors_temperatures(fahrenheit=False) or {}
     except Exception:
         return rows
     for name, entries in temps.items():
         for entry in entries:
+            if entry.current is None:
+                continue
             rows.append(
                 {
                     "sensor": name,
                     "label": entry.label or name,
-                    "current_c": entry.current,
+                    "current_c": float(entry.current),
                     "high_c": entry.high,
                     "critical_c": entry.critical,
+                    "source": "psutil",
+                    "kind": _classify_temp_label(entry.label or name),
                 }
             )
     return rows
+
+
+def _classify_temp_label(label: str) -> str:
+    lower = (label or "").lower()
+    if any(token in lower for token in ("gpu", "nvidia", "radeon", "geforce", "quadro", "rtx", "gtx", "rx ")):
+        return "gpu"
+    if any(token in lower for token in ("cpu", "core", "package", "tctl", "tdie", "pentium", "ryzen", "intel", "amd")):
+        return "cpu"
+    if "acpi" in lower or "thermal zone" in lower or "tz" == lower:
+        return "acpi"
+    return "other"
+
+
+def _windows_temperatures() -> list[dict[str, Any]]:
+    """Collect Windows temps via Libre/Open Hardware Monitor WMI and ACPI zones."""
+    global _WIN_TEMP_CACHE
+    now = time.time()
+    if _WIN_TEMP_CACHE and now - _WIN_TEMP_CACHE[0] < _WIN_TEMP_TTL_SEC:
+        return [dict(row) for row in _WIN_TEMP_CACHE[1]]
+
+    # Single PowerShell pass — avoids flashing consoles via CREATE_NO_WINDOW.
+    script = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$rows = New-Object System.Collections.Generic.List[object]
+
+function Add-TempRow($sensor, $label, $current, $source) {
+  if ($null -eq $current) { return }
+  try { $c = [double]$current } catch { return }
+  if ($c -lt -40 -or $c -gt 150) { return }
+  $rows.Add([pscustomobject]@{
+    sensor = $sensor
+    label = [string]$label
+    current_c = [math]::Round($c, 1)
+    source = $source
+  }) | Out-Null
+}
+
+foreach ($ns in @('root/LibreHardwareMonitor', 'root/OpenHardwareMonitor')) {
+  try {
+    $sensors = Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction SilentlyContinue |
+      Where-Object { $_.SensorType -eq 'Temperature' -and $null -ne $_.Value }
+    foreach ($s in $sensors) {
+      $label = if ($s.Name) { $s.Name } else { $s.Identifier }
+      if ($s.Identifier) { $label = "$label ($($s.Identifier))" }
+      Add-TempRow ($ns.Split('/')[-1]) $label $s.Value ($ns.Split('/')[-1])
+    }
+  } catch {}
+}
+
+try {
+  $zones = Get-CimInstance -Namespace root/WMI -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue
+  foreach ($z in $zones) {
+    $c = ([double]$z.CurrentTemperature / 10.0) - 273.15
+    $label = if ($z.InstanceName) { $z.InstanceName } else { 'ACPI Thermal Zone' }
+    Add-TempRow 'ACPI' $label $c 'MSAcpi_ThermalZoneTemperature'
+  }
+} catch {}
+
+if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress }
+"""
+    rows: list[dict[str, Any]] = []
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        _WIN_TEMP_CACHE = (now, [])
+        return []
+    try:
+        out = _run_capture(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            timeout=5,
+        ).strip()
+        if not out:
+            _WIN_TEMP_CACHE = (now, [])
+            return []
+
+        payload = json.loads(out)
+        if isinstance(payload, dict):
+            payload = [payload]
+        for item in payload or []:
+            current = item.get("current_c")
+            if current is None:
+                continue
+            label = str(item.get("label") or item.get("sensor") or "Sensor")
+            rows.append(
+                {
+                    "sensor": str(item.get("sensor") or "Windows"),
+                    "label": label,
+                    "current_c": float(current),
+                    "high_c": None,
+                    "critical_c": None,
+                    "source": str(item.get("source") or "Windows"),
+                    "kind": _classify_temp_label(label),
+                }
+            )
+    except (subprocess.SubprocessError, OSError, ValueError):
+        rows = []
+
+    _WIN_TEMP_CACHE = (now, list(rows))
+    return [dict(row) for row in rows]
+
+
+def _temps_from_gpus(gpus: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for idx, gpu in enumerate(gpus):
+        temp = gpu.get("temp_c")
+        if temp is None:
+            continue
+        vendor = gpu.get("vendor") or "GPU"
+        name = gpu.get("name") or f"GPU {idx}"
+        rows.append(
+            {
+                "sensor": str(vendor),
+                "label": f"{vendor} GPU: {name}",
+                "current_c": float(temp),
+                "high_c": None,
+                "critical_c": None,
+                "source": "nvidia-smi" if vendor == "NVIDIA" else "gpu-tool",
+                "kind": "gpu",
+            }
+        )
+    return rows
+
+
+def _dedupe_temps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, float]] = set()
+    unique: list[dict[str, Any]] = []
+    for row in rows:
+        key = (str(row.get("source")), str(row.get("label")), round(float(row["current_c"]), 1))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique
+
+
+def _pick_primary_temp(rows: list[dict[str, Any]], kind: str) -> float | None:
+    preferred_labels = {
+        "cpu": ("cpu package", "package", "tctl", "tdie", "cpu", "core average", "core max"),
+        "gpu": ("gpu", "nvidia", "radeon", "edge", "hotspot"),
+    }
+    candidates = [r for r in rows if r.get("kind") == kind and r.get("current_c") is not None]
+    if not candidates and kind == "cpu":
+        # ACPI zones are a weak fallback when nothing else reports CPU.
+        candidates = [r for r in rows if r.get("kind") == "acpi" and r.get("current_c") is not None]
+    if not candidates:
+        return None
+    prefs = preferred_labels.get(kind, ())
+    for pref in prefs:
+        for row in candidates:
+            if pref in str(row.get("label", "")).lower():
+                return float(row["current_c"])
+    return float(candidates[0]["current_c"])
+
+
+def _temperature_guidance(*, platform_name: str, rows: list[dict[str, Any]], gpus: list[dict[str, Any]]) -> list[str]:
+    notes: list[str] = []
+    has_cpu = any(r.get("kind") == "cpu" for r in rows) or any(r.get("kind") == "acpi" for r in rows)
+    has_gpu = any(r.get("kind") == "gpu" for r in rows) or any(g.get("temp_c") is not None for g in gpus)
+    nvidia_present = any((g.get("vendor") or "").upper() == "NVIDIA" for g in gpus)
+    nvidia_smi = _nvidia_smi_path()
+
+    if platform_name == "Windows":
+        if not has_cpu:
+            notes.append(
+                "CPU temp unavailable: Windows does not expose CPU package sensors to normal apps. "
+                "Install LibreHardwareMonitor (or OpenHardwareMonitor), run it (often as Admin), "
+                "and keep it open so SpecForge can read its WMI sensors."
+            )
+            notes.append(
+                "Optional fallback: ACPI thermal zones via WMI sometimes appear when SpecForge is run as Administrator, "
+                "but they are often inaccurate board zones — not true CPU package temp."
+            )
+        if not has_gpu:
+            if nvidia_smi:
+                notes.append(
+                    "GPU temp unavailable even though nvidia-smi was found. "
+                    "Confirm the NVIDIA driver is working (`nvidia-smi` in a terminal)."
+                )
+            else:
+                notes.append(
+                    "GPU temp unavailable: install/update NVIDIA drivers so `nvidia-smi` works "
+                    "(usually in PATH or System32). AMD: install amd-smi, or keep LibreHardwareMonitor running."
+                )
+            if nvidia_present and not nvidia_smi:
+                notes.append("An NVIDIA GPU was detected earlier, but nvidia-smi is not callable from SpecForge.")
+    else:
+        if not rows:
+            notes.append(
+                "No temperature sensors exposed on this host (common on VMs/cloud images without hwmon)."
+            )
+        elif not has_cpu:
+            notes.append("CPU temperature sensors were not found in hwmon/psutil.")
+        if not has_gpu and not nvidia_smi:
+            notes.append("GPU temperature needs nvidia-smi (NVIDIA) or vendor tools (AMD ROCm / amd-smi).")
+    return notes
+
+
+def _temperatures(gpus: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    gpus = gpus or []
+    rows: list[dict[str, Any]] = []
+    rows.extend(_psutil_temperatures())
+    if platform.system() == "Windows":
+        rows.extend(_windows_temperatures())
+    rows.extend(_temps_from_gpus(gpus))
+    rows = _dedupe_temps(rows)
+
+    # Prefer useful ordering: CPU-ish first, then GPU, then other.
+    kind_rank = {"cpu": 0, "acpi": 1, "gpu": 2, "other": 3}
+    rows.sort(key=lambda r: (kind_rank.get(str(r.get("kind")), 9), str(r.get("label", ""))))
+
+    cpu_c = _pick_primary_temp(rows, "cpu")
+    gpu_c = _pick_primary_temp(rows, "gpu")
+    if gpu_c is None:
+        for g in gpus:
+            if g.get("temp_c") is not None:
+                gpu_c = float(g["temp_c"])
+                break
+
+    status = {
+        "cpu_c": cpu_c,
+        "gpu_c": gpu_c,
+        "available": bool(rows),
+        "notes": _temperature_guidance(platform_name=platform.system(), rows=rows, gpus=gpus),
+        "sources": sorted({str(r.get("source")) for r in rows if r.get("source")}),
+    }
+    return rows, status
 
 
 @dataclass
@@ -259,6 +582,7 @@ class Snapshot:
     cuda: dict[str, Any] = field(default_factory=dict)
     power: list[dict[str, Any]] = field(default_factory=list)
     temperatures: list[dict[str, Any]] = field(default_factory=list)
+    temperature_status: dict[str, Any] = field(default_factory=dict)
     processes_top: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -395,6 +719,8 @@ class SpecsCollector:
 
         gpus = _gpu_nvidia()
         if not gpus:
+            gpus = _gpu_amd()
+        if not gpus:
             gpus = _gpus_fallback()
         if not gpus:
             gpus = [
@@ -402,9 +728,18 @@ class SpecsCollector:
                     "vendor": "None",
                     "name": "No discrete GPU detected",
                     "cuda_available": False,
-                    "note": "Install NVIDIA drivers for CUDA metrics, or AMD ROCm tools for Radeon stats.",
+                    "temp_c": None,
+                    "note": (
+                        "Install NVIDIA drivers (nvidia-smi) for GPU temp/CUDA metrics, "
+                        "or AMD amd-smi / LibreHardwareMonitor for Radeon temps."
+                    ),
                 }
             ]
+
+        temperatures, temperature_status = _temperatures(gpus)
+        # Surface primary temps on CPU dict for UI convenience.
+        cpu_temp_c = temperature_status.get("cpu_c")
+        gpu_temp_c = temperature_status.get("gpu_c")
 
         # Top processes are relatively expensive on Windows; refresh every ~2s.
         if now - self._procs_at >= 2.0 or not self._cached_procs:
@@ -441,7 +776,7 @@ class SpecsCollector:
                 "uptime_sec": int(now - psutil.boot_time()),
             },
             cpu={
-                "model": _cpu_model_fallback() or platform.processor() or "Unknown CPU",
+                "model": _cpu_model(),
                 "physical_cores": psutil.cpu_count(logical=False),
                 "logical_cores": psutil.cpu_count(logical=True),
                 "usage_percent": psutil.cpu_percent(interval=None),
@@ -449,6 +784,7 @@ class SpecsCollector:
                 "freq_current_mhz": cpu_freq.current if cpu_freq else None,
                 "freq_max_mhz": cpu_freq.max if cpu_freq else None,
                 "load_avg": list(os.getloadavg()) if hasattr(os, "getloadavg") else [],
+                "temp_c": cpu_temp_c,
             },
             memory={
                 "total": _bytes_human(mem.total),
@@ -470,16 +806,119 @@ class SpecsCollector:
             gpu=gpus,
             cuda=_cuda_toolkit(),
             power=_power_supply(),
-            temperatures=_temperatures(),
+            temperatures=temperatures,
+            temperature_status={
+                **temperature_status,
+                "gpu_c": gpu_temp_c,
+            },
             processes_top=list(procs),
         )
 
 
-def _cpu_model_fallback() -> str:
+_CPU_MODEL_CACHE: str | None = None
+
+
+def _looks_like_cpu_brand(value: str | None) -> bool:
+    if not value:
+        return False
+    cleaned = " ".join(str(value).split()).strip()
+    if not cleaned:
+        return False
+    lower = cleaned.lower()
+    junk = {
+        "x86_64",
+        "amd64",
+        "i386",
+        "i686",
+        "arm64",
+        "aarch64",
+        "unknown",
+        "unknown cpu",
+    }
+    if lower in junk:
+        return False
+    # Windows platform.processor() often returns this useless Family/Model string.
+    if lower.startswith("intel64 family") or lower.startswith("amd64 family"):
+        return False
+    if "family" in lower and "model" in lower and "stepping" in lower:
+        return False
+    return True
+
+
+def _cpu_model_from_proc() -> str | None:
     try:
         for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
             if line.lower().startswith("model name"):
-                return line.split(":", 1)[1].strip()
+                value = line.split(":", 1)[1].strip()
+                if _looks_like_cpu_brand(value):
+                    return value
     except OSError:
-        pass
-    return "Unknown CPU"
+        return None
+    return None
+
+
+def _cpu_model_from_windows_registry() -> str | None:
+    if platform.system() != "Windows":
+        return None
+    try:
+        import winreg  # stdlib on Windows
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+        value = " ".join(str(value).split()).strip()
+        return value if _looks_like_cpu_brand(value) else None
+    except Exception:
+        return None
+
+
+def _cpu_model_from_windows_wmi() -> str | None:
+    if platform.system() != "Windows":
+        return None
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    commands: list[list[str]] = []
+    if powershell:
+        commands.append(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "(Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name)",
+            ]
+        )
+    if shutil.which("wmic"):
+        commands.append(["wmic", "cpu", "get", "Name"])
+    for cmd in commands:
+        try:
+            out = _run_capture(cmd, timeout=4).strip()
+        except (subprocess.SubprocessError, OSError, FileNotFoundError):
+            continue
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip() and ln.strip().lower() != "name"]
+        if lines and _looks_like_cpu_brand(lines[0]):
+            return " ".join(lines[0].split())
+    return None
+
+
+def _cpu_model() -> str:
+    """Return a human CPU brand string (cached)."""
+    global _CPU_MODEL_CACHE
+    if _CPU_MODEL_CACHE:
+        return _CPU_MODEL_CACHE
+
+    for value in (
+        _cpu_model_from_proc(),
+        _cpu_model_from_windows_registry(),
+        _cpu_model_from_windows_wmi(),
+        platform.processor(),
+        os.environ.get("PROCESSOR_IDENTIFIER"),
+    ):
+        if _looks_like_cpu_brand(value):
+            _CPU_MODEL_CACHE = " ".join(str(value).split())
+            return _CPU_MODEL_CACHE
+    _CPU_MODEL_CACHE = "Unknown CPU"
+    return _CPU_MODEL_CACHE

@@ -50,6 +50,27 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_executable.ps1
 
 Output: `dist\SpecForge.exe`
 
+### Temperatures on Windows (CPU / GPU)
+
+Windows does **not** expose CPU package temperature through normal APIs (`psutil` sensors are empty there). SpecForge therefore uses several sources:
+
+| Sensor | How SpecForge reads it | What you need |
+|--------|------------------------|---------------|
+| **GPU (NVIDIA)** | `nvidia-smi` (`temperature.gpu`) | Current NVIDIA drivers. `nvidia-smi` is usually in PATH or `C:\Windows\System32`. |
+| **GPU (AMD)** | `amd-smi` / `rocm-smi` when installed, or LibreHardwareMonitor | AMD software / LHM |
+| **CPU** | LibreHardwareMonitor or OpenHardwareMonitor WMI | Install [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor), **run it (often as Administrator)**, and **leave it open** |
+| **ACPI zones** | `MSAcpi_ThermalZoneTemperature` | Sometimes needs Admin; often inaccurate board zones, not true CPU package |
+
+In the app, CPU/GPU temps appear as header meters and again in the **Temperatures** panel (with setup hints when a reading is unavailable).
+
+Quick checks on your PC:
+
+```bat
+nvidia-smi --query-gpu=name,temperature.gpu --format=csv
+```
+
+If that fails, fix/install NVIDIA drivers before expecting GPU temp in SpecForge.
+
 ### Updates from GitHub (including exe auto-update)
 
 In SpecForge:
