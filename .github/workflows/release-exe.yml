@@ -18,11 +18,15 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
+          # 64-bit is required so per-core CPU samples cover all logical processors.
           python-version: "3.12"
+          architecture: "x64"
 
       - name: Build SpecForge.exe
         shell: pwsh
         run: |
+          $bits = python -c "import struct; print(struct.calcsize('P') * 8)"
+          if ($bits -ne "64") { throw "Expected 64-bit Python, got ${bits}-bit" }
           python -m venv .venv
           .\.venv\Scripts\python -m pip install --upgrade pip
           .\.venv\Scripts\pip install -r requirements.txt

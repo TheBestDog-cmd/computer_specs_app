@@ -9,7 +9,13 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 Write-Host "Working directory: $(Get-Location)"
 
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-    Write-Error "Python was not found on PATH. Install Python 3.10+ from https://www.python.org/downloads/ and check 'Add python.exe to PATH'."
+    Write-Error "Python was not found on PATH. Install Python 3.10+ (64-bit) from https://www.python.org/downloads/ and check 'Add python.exe to PATH'."
+}
+
+# 32-bit Python/PyInstaller builds can under-report logical CPUs on Windows; require 64-bit.
+$bitness = & python -c "import struct; print(struct.calcsize('P') * 8)"
+if ($LASTEXITCODE -ne 0 -or "$bitness" -ne "64") {
+    Write-Error "Need 64-bit Python to build SpecForge.exe (got ${bitness}-bit). Install the x86-64 installer from python.org."
 }
 
 python -m venv .venv

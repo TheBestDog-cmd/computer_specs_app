@@ -7,8 +7,16 @@ echo Working directory: %CD%
 where python >nul 2>nul
 if errorlevel 1 (
   echo ERROR: Python was not found on PATH.
-  echo Install Python 3.10+ from https://www.python.org/downloads/
+  echo Install Python 3.10+ ^(64-bit^) from https://www.python.org/downloads/
   echo and check "Add python.exe to PATH", then reopen this terminal.
+  exit /b 1
+)
+
+REM 32-bit Python/PyInstaller builds can under-report logical CPUs on Windows.
+for /f %%B in ('python -c "import struct; print(struct.calcsize('P') * 8)"') do set PYBITS=%%B
+if not "%PYBITS%"=="64" (
+  echo ERROR: Need 64-bit Python to build SpecForge.exe ^(got %PYBITS%-bit^).
+  echo Install the Windows x86-64 installer from python.org.
   exit /b 1
 )
 

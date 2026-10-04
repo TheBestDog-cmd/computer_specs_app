@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import shutil
+import struct
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
@@ -13,6 +14,31 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+
+
+def _process_bitness() -> int:
+    """Return 32 or 64 for the running interpreter / frozen exe."""
+    return struct.calcsize("P") * 8
+
+
+def _ensure_full_cpu_affinity() -> None:
+    """Clear accidental CPU affinity masks so per-core samples cover all logical CPUs.
+
+    A restricted affinity (or a 32-bit process on some Windows setups) can make
+    psutil.cpu_percent(percpu=True) report fewer cores than the machine has.
+    """
+    try:
+        proc = psutil.Process()
+        if not hasattr(proc, "cpu_affinity"):
+            return
+        affinity = proc.cpu_affinity()
+        logical = psutil.cpu_count(logical=True) or 0
+        if not affinity or logical <= 0:
+            return
+        if len(affinity) < logical:
+            proc.cpu_affinity(list(range(logical)))
+    except (AttributeError, NotImplementedError, OSError, psutil.Error):
+        return
 
 
 def _subprocess_kwargs() -> dict[str, Any]:
@@ -596,7 +622,8 @@ class SpecsCollector:
         self._prev_time = time.time()
         self._cached_procs: list[dict[str, Any]] = []
         self._procs_at = 0.0
-        # Prime CPU percent
+        _ensure_full_cpu_affinity()
+        # Prime CPU percent (overall + every logical core)
         psutil.cpu_percent(interval=None)
         psutil.cpu_percent(interval=None, percpu=True)
 
@@ -605,7 +632,15 @@ class SpecsCollector:
         dt = max(now - self._prev_time, 1e-6)
 
         cpu_freq = psutil.cpu_freq()
-        per_core = psutil.cpu_percent(interval=None, percpu=True)
+        logical_cores = psutil.cpu_count(logical=True)
+        per_core = list(psutil.cpu_percent(interval=None, percpu=True) or [])
+        # If affinity was tightened after init, re-prime and resample all logical cores.
+        if logical_cores and len(per_core) < logical_cores:
+            _ensure_full_cpu_affinity()
+            psutil.cpu_percent(interval=None, percpu=True)
+            primed = list(psutil.cpu_percent(interval=None, percpu=True) or [])
+            if len(primed) >= len(per_core):
+                per_core = primed
         mem = psutil.virtual_memory()
         swap = psutil.swap_memory()
 
@@ -778,9 +813,10 @@ class SpecsCollector:
             cpu={
                 "model": _cpu_model(),
                 "physical_cores": psutil.cpu_count(logical=False),
-                "logical_cores": psutil.cpu_count(logical=True),
+                "logical_cores": logical_cores,
                 "usage_percent": psutil.cpu_percent(interval=None),
                 "per_core_percent": per_core,
+                "process_bitness": _process_bitness(),
                 "freq_current_mhz": cpu_freq.current if cpu_freq else None,
                 "freq_max_mhz": cpu_freq.max if cpu_freq else None,
                 "load_avg": list(os.getloadavg()) if hasattr(os, "getloadavg") else [],

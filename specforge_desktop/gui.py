@@ -63,8 +63,14 @@ class MeterRow(ctk.CTkFrame):
         self.value.configure(text=label)
 
 
+def cpu_section_height(core_count: int, *, header_lines: int = 6, line_px: int = 18, min_px: int = 200, max_px: int = 380) -> int:
+    """Pick a CPU panel height that fits typical 8–16-core lists; taller machines scroll."""
+    n = max(0, int(core_count))
+    return max(min_px, min(max_px, (header_lines + n) * line_px + 8))
+
+
 class Section(ctk.CTkFrame):
-    def __init__(self, master, title: str, **kwargs):
+    def __init__(self, master, title: str, *, scrollable: bool = False, **kwargs):
         super().__init__(master, fg_color=PANEL, corner_radius=10, border_width=1, border_color="#D5E0DB", **kwargs)
         self._last_text = None
         self.title = ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=15, weight="bold"), text_color=ACCENT_DEEP)
@@ -73,7 +79,7 @@ class Section(ctk.CTkFrame):
         self.body = ctk.CTkTextbox(
             self,
             height=120,
-            activate_scrollbars=False,
+            activate_scrollbars=scrollable,
             font=ctk.CTkFont(family="Consolas", size=12),
             text_color=INK,
             fg_color=PANEL,
@@ -205,8 +211,9 @@ class SpecForgeApp(ctk.CTk):
         self.sec_system = Section(self.container, "System")
         self.sec_system.set_height(110)
         self.sec_system.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-        self.sec_cpu = Section(self.container, "CPU / Cores")
-        self.sec_cpu.set_height(170)
+        # Scrollable + taller default so cores beyond 0–5 are not clipped (old 170px hid them).
+        self.sec_cpu = Section(self.container, "CPU / Cores", scrollable=True)
+        self.sec_cpu.set_height(cpu_section_height(16))
         self.sec_cpu.grid(row=0, column=1, sticky="nsew", padx=8, pady=8)
 
         self.sec_mem = Section(self.container, "Memory & Swap")
@@ -341,11 +348,23 @@ class SpecForgeApp(ctk.CTk):
         )
 
         cores = snap.cpu.get("per_core_percent") or []
+        logical = snap.cpu.get("logical_cores")
+        try:
+            expected = int(logical) if logical is not None else len(cores)
+        except (TypeError, ValueError):
+            expected = len(cores)
+        # Size for collected samples; fall back to advertised logical count if samples empty.
+        self.sec_cpu.set_height(cpu_section_height(len(cores) or expected))
         core_lines = []
         for i, pct in enumerate(cores):
             filled = min(10, max(0, int(pct // 10)))
             bar = "#" * filled + "-" * (10 - filled)
             core_lines.append(f"Core {i:02d}  [{bar}]  {pct:5.1f}%")
+        if expected and len(cores) < expected:
+            core_lines.append(
+                f"… only {len(cores)} of {expected} logical cores reported "
+                "(process may be affinity-limited or 32-bit)"
+            )
         load = snap.cpu.get("load_avg") or []
         load_txt = " / ".join(f"{x:.2f}" for x in load) if load else "n/a"
         cpu_temp = snap.cpu.get("temp_c")

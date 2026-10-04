@@ -50,6 +50,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_executable.ps1
 
 Output: `dist\SpecForge.exe`
 
+Build with **64-bit Python** (the scripts refuse 32-bit). A 32-bit exe can under-report logical CPUs on Windows.
+
+### CPU cores panel
+
+The CPU panel lists every logical core from `psutil.cpu_percent(percpu=True)`. It is scrollable and sized for typical 8–16-core machines (taller lists scroll inside the panel).
+
 ### Temperatures on Windows (CPU / GPU)
 
 Windows does **not** expose CPU package temperature through normal APIs (`psutil` sensors are empty there). SpecForge therefore uses several sources:
