@@ -11,45 +11,109 @@ Track live inventory and usage for:
 - Disks and disk I/O rates
 - Network interfaces and throughput
 - GPU / CUDA (via `nvidia-smi` + `nvcc` when available)
-- PSU / power (from Linux `power_supply` sensors when exposed)
+- PSU / power (from OS power sensors when exposed)
 - Temperatures and top processes
 
 ### Requirements
 
-- Python 3.10+
-- Tk (Linux: `sudo apt install python3-tk`)
+- Python 3.10+ from [python.org](https://www.python.org/downloads/)
+  - During install on Windows: check **Add python.exe to PATH**
+- Tk (usually included with the official Windows Python installer)
+- Linux only if needed: `sudo apt install python3-tk`
 
 ### Run from source
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+**PowerShell**
+
+```powershell
+cd $HOME\Desktop\computer_specs_app-main
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python main.py
 ```
 
-### Build a single executable
+If PowerShell blocks script activation:
 
-```bash
-bash scripts/build_executable.sh
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-The binary is written to `dist/SpecForge` (Linux/macOS) or `dist/SpecForge.exe` (Windows).
+**Command Prompt (cmd)**
 
-Double-click / run that file anytime — no Python install required on the target machine for the frozen build.
+```bat
+cd %USERPROFILE%\Desktop\computer_specs_app-main
+python -m venv .venv
+.venv\Scripts\activate.bat
+pip install -r requirements.txt
+python main.py
+```
 
-On Windows, build with `scripts\build_executable.bat` (uses `--noconsole`). Rebuild after pulling fixes so `nvidia-smi` refresh calls no longer flash a CMD window every second.
+**Linux / macOS**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
+```
+
+### Build a single executable (Windows)
+
+Do **not** use `bash scripts/build_executable.sh` on Windows unless you intentionally use WSL.
+Build with native Windows Python instead.
+
+**PowerShell (recommended)**
+
+```powershell
+cd $HOME\Desktop\computer_specs_app-main
+.\scripts\build_executable.ps1
+```
+
+Or step-by-step:
+
+```powershell
+cd $HOME\Desktop\computer_specs_app-main
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pyinstaller --noconfirm --clean --onefile --noconsole --name SpecForge --collect-all customtkinter main.py
+```
+
+**Command Prompt (cmd)**
+
+```bat
+cd %USERPROFILE%\Desktop\computer_specs_app-main
+scripts\build_executable.bat
+```
+
+Or step-by-step:
+
+```bat
+cd %USERPROFILE%\Desktop\computer_specs_app-main
+python -m venv .venv
+.venv\Scripts\activate.bat
+pip install -r requirements.txt
+pyinstaller --noconfirm --clean --onefile --noconsole --name SpecForge --collect-all customtkinter main.py
+```
+
+Output file:
+
+- Windows: `dist\SpecForge.exe`
+- Linux/macOS: `dist/SpecForge` (use `bash scripts/build_executable.sh`)
+
+Then double-click `dist\SpecForge.exe` anytime. No Python install is required on other PCs for that frozen build.
+
+`--noconsole` keeps SpecForge GUI-only. Rebuild after pulling updates so `nvidia-smi` refresh calls do not flash a CMD window every second.
 
 ### Tests
 
-```bash
-source .venv/bin/activate
+```powershell
+.\.venv\Scripts\Activate.ps1
 pytest -q
 ```
 
-## Optional web UI (Node)
-
-A lighter browser UI remains available:
+### Optional web UI (Node)
 
 ```bash
 npm ci
