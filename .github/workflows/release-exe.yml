@@ -86,7 +86,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Keep the release download page Setup-only (drop leftover SpecForge.exe).
+          # gh exits non-zero when the asset is already absent — that is success for us.
           gh release delete-asset latest SpecForge.exe --yes 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "No SpecForge.exe asset to remove (or already gone)."
-          }
+          Write-Host "Legacy SpecForge.exe cleanup finished (removed or already absent)."
+          exit 0
