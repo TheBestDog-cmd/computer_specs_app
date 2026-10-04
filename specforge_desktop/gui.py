@@ -21,6 +21,10 @@ PANEL = "#F4F8F6"
 TRACK = "#D7E3DE"
 WARN = "#C46B2C"
 
+# Pause every snapshot-driven widget update after scroll/drag so the UI thread
+# can paint wheel/scrollbar motion without competing CTk configure/layout work.
+SCROLL_PAUSE_SEC = 0.55
+
 
 def _fmt_uptime(seconds: int) -> str:
     days, rem = divmod(int(seconds), 86400)
@@ -35,6 +39,237 @@ def _fmt_uptime(seconds: int) -> str:
         parts.append(f"{mins}m")
     parts.append(f"{secs}s")
     return " ".join(parts)
+
+
+def format_core_lines(cores: list[float], expected: int | None = None, *, dense_after: int = 16) -> list[str]:
+    """Render per-core bars; collapse very high core counts to keep redraws cheap."""
+    n = len(cores)
+    exp = expected if expected is not None else n
+    lines: list[str] = []
+
+    def one(i: int, pct: float) -> str:
+        filled = min(10, max(0, int(pct // 10)))
+        bar = "#" * filled + "-" * (10 - filled)
+        return f"Core {i:02d}  [{bar}]  {pct:5.1f}%"
+
+    if n <= dense_after:
+        lines.extend(one(i, pct) for i, pct in enumerate(cores))
+    elif n:
+        # Compact summary + endpoints so large CPUs do not thrash the textbox.
+        avg = sum(cores) / n
+        mn = min(cores)
+        mx = max(cores)
+        lines.append(f"Cores       {n} logical  avg {avg:5.1f}%  min {mn:5.1f}%  max {mx:5.1f}%")
+        lines.append("")
+        show = 4
+        for i in range(show):
+            lines.append(one(i, cores[i]))
+        lines.append(f"… ({n - show * 2} cores omitted while monitoring) …")
+        for i in range(n - show, n):
+            lines.append(one(i, cores[i]))
+
+    if exp and n < exp:
+        lines.append(
+            f"… only {n} of {exp} logical cores reported "
+            "(process may be affinity-limited or 32-bit)"
+        )
+    return lines
+
+
+def format_temperature_lines(snap: Snapshot) -> list[str]:
+    """Format every collected temperature sensor for the Temperatures section."""
+    status = snap.temperature_status or {}
+    lines = [
+        "=== Temperatures ===",
+        f"CPU temp     {status['cpu_c']:.1f} C" if isinstance(status.get("cpu_c"), (int, float)) else "CPU temp     unavailable",
+        f"GPU temp     {status['gpu_c']:.1f} C" if isinstance(status.get("gpu_c"), (int, float)) else "GPU temp     unavailable",
+    ]
+    sources = status.get("sources") or []
+    if sources:
+        lines.append(f"Sources      {', '.join(str(s) for s in sources)}")
+
+    rows = list(snap.temperatures or [])
+    if rows:
+        kind_titles = {
+            "cpu": "CPU",
+            "gpu": "GPU",
+            "acpi": "Board / ACPI",
+            "other": "Other sensors",
+        }
+        kind_order = ("cpu", "gpu", "acpi", "other")
+        grouped: dict[str, list[dict]] = {k: [] for k in kind_order}
+        for row in rows:
+            kind = str(row.get("kind") or "other")
+            if kind not in grouped:
+                kind = "other"
+            grouped[kind].append(row)
+
+        for kind in kind_order:
+            group = grouped[kind]
+            if not group:
+                continue
+            lines.append("")
+            lines.append(f"-- {kind_titles[kind]} --")
+            for t in group:
+                label = str(t.get("label") or t.get("sensor") or "Sensor")
+                src = t.get("source") or t.get("sensor") or "?"
+                current = t.get("current_c")
+                if not isinstance(current, (int, float)):
+                    continue
+                extra = ""
+                high = t.get("high_c")
+                critical = t.get("critical_c")
+                if isinstance(high, (int, float)):
+                    extra += f"  high {high:.0f}"
+                if isinstance(critical, (int, float)):
+                    extra += f"  crit {critical:.0f}"
+                lines.append(f"  {label:<28} {current:5.1f} C  [{src}]{extra}")
+    else:
+        lines.append("")
+        lines.append("No temperature sensors reported yet.")
+
+    notes = status.get("notes") or []
+    if notes:
+        lines.append("")
+        lines.append("How to enable missing temps:")
+        for note in notes:
+            lines.append(f"- {note}")
+    return lines
+
+
+def build_dashboard_text(snap: Snapshot) -> str:
+    """Build the single scrollable dashboard body (pure; safe to unit-test)."""
+    blocks: list[str] = []
+
+    sys = snap.system
+    blocks.append(
+        "\n".join(
+            [
+                "=== System ===",
+                f"Hostname     {sys.get('hostname')}",
+                f"OS           {sys.get('os')}",
+                f"Kernel       {sys.get('release')} ({sys.get('arch')})",
+                f"Uptime       {_fmt_uptime(sys.get('uptime_sec', 0))}",
+                f"Python       {sys.get('python')}",
+            ]
+        )
+    )
+
+    cores = snap.cpu.get("per_core_percent") or []
+    logical = snap.cpu.get("logical_cores")
+    try:
+        expected = int(logical) if logical is not None else len(cores)
+    except (TypeError, ValueError):
+        expected = len(cores)
+    load = snap.cpu.get("load_avg") or []
+    load_txt = " / ".join(f"{x:.2f}" for x in load) if load else "n/a"
+    cpu_temp = snap.cpu.get("temp_c")
+    cpu_temp_txt = f"{cpu_temp:.1f} C" if isinstance(cpu_temp, (int, float)) else "unavailable"
+    blocks.append(
+        "\n".join(
+            [
+                "=== CPU / Cores ===",
+                f"Model        {snap.cpu.get('model')}",
+                f"Cores        {snap.cpu.get('physical_cores')} physical · {snap.cpu.get('logical_cores')} logical",
+                f"Frequency    {snap.cpu.get('freq_current_mhz') or 'n/a'} MHz (max {snap.cpu.get('freq_max_mhz') or 'n/a'})",
+                f"CPU temp     {cpu_temp_txt}",
+                f"Load avg     {load_txt}",
+                "",
+                *format_core_lines(list(cores), expected),
+            ]
+        )
+    )
+
+    blocks.append(
+        "\n".join(
+            [
+                "=== Memory & Swap ===",
+                f"RAM used     {snap.memory.get('used')} / {snap.memory.get('total')} ({snap.memory.get('percent')}%)",
+                f"Available    {snap.memory.get('available')}",
+                f"Swap used    {snap.swap.get('used')} / {snap.swap.get('total')} ({snap.swap.get('percent')}%)",
+            ]
+        )
+    )
+
+    disk_lines = ["=== Disks & I/O ==="]
+    for d in snap.disks:
+        disk_lines.append(
+            f"{d['mount']}  {d['used']} / {d['total']} ({d['percent']}%)  [{d['fstype']}]"
+        )
+    io = snap.disk_io or {}
+    disk_lines.extend(
+        [
+            "",
+            f"Read         {io.get('read_human_s', 'n/a')}",
+            f"Write        {io.get('write_human_s', 'n/a')}",
+        ]
+    )
+    blocks.append("\n".join(disk_lines) if len(disk_lines) > 1 else "=== Disks & I/O ===\nNo disks found")
+
+    gpu_lines = ["=== GPU / CUDA ==="]
+    if snap.gpu:
+        for g in snap.gpu:
+            gpu_lines.append(f"{g.get('vendor', '?')}: {g.get('name')}")
+            temp = g.get("temp_c")
+            temp_txt = f"{temp:.1f} C" if isinstance(temp, (int, float)) else "unavailable"
+            if g.get("cuda_available") or g.get("vendor") == "NVIDIA":
+                gpu_lines.extend(
+                    [
+                        f"  Temp       {temp_txt}",
+                        f"  Driver     {g.get('driver')}",
+                        f"  VRAM       {g.get('memory_used_mb')} / {g.get('memory_total_mb')} MB",
+                        f"  GPU util   {g.get('util_gpu_percent')}% · mem util {g.get('util_mem_percent')}%",
+                        f"  Power      {g.get('power_draw_w')} W / {g.get('power_limit_w')} W",
+                        f"  Clocks     SM {g.get('clock_sm_mhz')} · MEM {g.get('clock_mem_mhz')} MHz",
+                    ]
+                )
+            else:
+                gpu_lines.append(f"  Temp       {temp_txt}")
+                if g.get("note"):
+                    gpu_lines.append(f"  {g['note']}")
+        cuda = snap.cuda or {}
+        gpu_lines.extend(
+            [
+                "",
+                f"CUDA toolkit {'detected - ' + str(cuda.get('nvcc_version')) if cuda.get('toolkit_detected') else 'not detected'}",
+            ]
+        )
+        if cuda.get("note") and not cuda.get("toolkit_detected"):
+            gpu_lines.append(cuda["note"])
+    else:
+        note = (snap.cuda or {}).get("note") or "No GPU devices detected."
+        gpu_lines.append(note)
+    blocks.append("\n".join(gpu_lines))
+
+    blocks.append("\n".join(format_temperature_lines(snap)))
+
+    net_lines = ["=== Network ==="]
+    io = snap.net_io or {}
+    net_lines.append(f"Throughput   down {io.get('recv_human_s', 'n/a')}  up {io.get('sent_human_s', 'n/a')}")
+    net_lines.append("")
+    for n in snap.network[:12]:
+        up = "up" if n.get("isup") else "down"
+        net_lines.append(f"{n['name']} [{n['family']}] {n['address']} ({up})")
+    blocks.append("\n".join(net_lines))
+
+    power_lines = ["=== PSU / Power ==="]
+    for p in snap.power:
+        power_lines.append(f"{p.get('name')}  ({p.get('type', p.get('status', 'power'))})")
+        for key in ("status", "capacity", "voltage_v", "current_a", "power_w", "online", "detail", "manufacturer", "model_name"):
+            if key in p and p[key] not in (None, ""):
+                power_lines.append(f"  {key}: {p[key]}")
+    blocks.append(
+        "\n".join(power_lines) if len(power_lines) > 1 else "=== PSU / Power ===\nPower data unavailable"
+    )
+
+    proc_lines = ["=== Top processes ===", "PID     CPU%   MEM%   NAME", "-" * 48]
+    for p in snap.processes_top:
+        proc_lines.append(
+            f"{str(p['pid']):<7} {p['cpu_percent']:>5.1f}  {p['memory_percent']:>5.1f}  {p['name']}"
+        )
+    blocks.append("\n".join(proc_lines))
+
+    return "\n\n".join(blocks)
 
 
 class MeterRow(ctk.CTkFrame):
@@ -63,46 +298,6 @@ class MeterRow(ctk.CTkFrame):
         self.value.configure(text=label)
 
 
-def cpu_section_height(core_count: int, *, header_lines: int = 6, line_px: int = 18, min_px: int = 200, max_px: int = 380) -> int:
-    """Pick a CPU panel height that fits typical 8–16-core lists; taller machines scroll."""
-    n = max(0, int(core_count))
-    return max(min_px, min(max_px, (header_lines + n) * line_px + 8))
-
-
-class Section(ctk.CTkFrame):
-    def __init__(self, master, title: str, *, scrollable: bool = False, **kwargs):
-        super().__init__(master, fg_color=PANEL, corner_radius=10, border_width=1, border_color="#D5E0DB", **kwargs)
-        self._last_text = None
-        self.title = ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=15, weight="bold"), text_color=ACCENT_DEEP)
-        self.title.pack(anchor="w", padx=14, pady=(12, 4))
-        # Textbox is much cheaper to update than multi-line CTkLabel during scroll.
-        self.body = ctk.CTkTextbox(
-            self,
-            height=120,
-            activate_scrollbars=scrollable,
-            font=ctk.CTkFont(family="Consolas", size=12),
-            text_color=INK,
-            fg_color=PANEL,
-            border_width=0,
-            wrap="word",
-        )
-        self.body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.body.insert("1.0", "Loading…")
-        self.body.configure(state="disabled")
-
-    def set_height(self, px: int) -> None:
-        self.body.configure(height=px)
-
-    def set_text(self, text: str) -> None:
-        if text == self._last_text:
-            return
-        self._last_text = text
-        self.body.configure(state="normal")
-        self.body.delete("1.0", "end")
-        self.body.insert("1.0", text)
-        self.body.configure(state="disabled")
-
-
 class SpecForgeApp(ctk.CTk):
     def __init__(self, refresh_ms: int = 1000):
         super().__init__()
@@ -116,6 +311,9 @@ class SpecForgeApp(ctk.CTk):
         self._error: str | None = None
         self._last_rendered_at: float | None = None
         self._scroll_until = 0.0
+        self._last_dashboard = None
+        self._last_status = None
+        self._scroll_hint_shown = False
 
         ctk.set_appearance_mode("light")
         ctk.set_default_color_theme("green")
@@ -148,7 +346,7 @@ class SpecForgeApp(ctk.CTk):
 
         subtitle = ctk.CTkLabel(
             header,
-            text="Live inventory and usage for CPU, memory, disks, network, GPU/CUDA, temperatures, and power.",
+            text="Live inventory and usage for CPU, memory, disks, network, GPU/CUDA, temperatures, power, and top processes.",
             font=ctk.CTkFont(size=13),
             text_color=MUTED,
         )
@@ -204,58 +402,77 @@ class SpecForgeApp(ctk.CTk):
         self.gpu_temp_meter.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
     def _build_body(self) -> None:
-        self.container = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        self.container.pack(fill="both", expand=True, padx=12, pady=(0, 16))
-        self.container.grid_columnconfigure((0, 1), weight=1, uniform="cols")
+        # One native-scrolling textbox beats CTkScrollableFrame + many nested
+        # CTk frames/textboxes: scroll no longer reflows a widget tree each tick.
+        shell = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10, border_width=1, border_color="#D5E0DB")
+        shell.pack(fill="both", expand=True, padx=20, pady=(0, 16))
 
-        self.sec_system = Section(self.container, "System")
-        self.sec_system.set_height(110)
-        self.sec_system.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-        # Scrollable + taller default so cores beyond 0–5 are not clipped (old 170px hid them).
-        self.sec_cpu = Section(self.container, "CPU / Cores", scrollable=True)
-        self.sec_cpu.set_height(cpu_section_height(16))
-        self.sec_cpu.grid(row=0, column=1, sticky="nsew", padx=8, pady=8)
+        title = ctk.CTkLabel(
+            shell,
+            text="Live dashboard",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=ACCENT_DEEP,
+        )
+        title.pack(anchor="w", padx=14, pady=(12, 4))
 
-        self.sec_mem = Section(self.container, "Memory & Swap")
-        self.sec_mem.set_height(90)
-        self.sec_mem.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
-        self.sec_disk = Section(self.container, "Disks & I/O")
-        self.sec_disk.set_height(120)
-        self.sec_disk.grid(row=1, column=1, sticky="nsew", padx=8, pady=8)
+        self.dashboard = ctk.CTkTextbox(
+            shell,
+            activate_scrollbars=True,
+            font=ctk.CTkFont(family="Consolas", size=12),
+            text_color=INK,
+            fg_color=PANEL,
+            border_width=0,
+            wrap="none",
+        )
+        self.dashboard.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.dashboard.insert("1.0", "Loading…")
+        self.dashboard.configure(state="disabled")
 
-        self.sec_gpu = Section(self.container, "GPU / CUDA")
-        self.sec_gpu.set_height(160)
-        self.sec_gpu.grid(row=2, column=0, sticky="nsew", padx=8, pady=8)
-        self.sec_temp = Section(self.container, "Temperatures")
-        self.sec_temp.set_height(160)
-        self.sec_temp.grid(row=2, column=1, sticky="nsew", padx=8, pady=8)
-
-        self.sec_net = Section(self.container, "Network")
-        self.sec_net.set_height(140)
-        self.sec_net.grid(row=3, column=0, sticky="nsew", padx=8, pady=8)
-        self.sec_power = Section(self.container, "PSU / Power")
-        self.sec_power.set_height(120)
-        self.sec_power.grid(row=3, column=1, sticky="nsew", padx=8, pady=8)
-
-        self.sec_proc = Section(self.container, "Top processes")
-        self.sec_proc.set_height(160)
-        self.sec_proc.grid(row=4, column=0, columnspan=2, sticky="nsew", padx=8, pady=8)
+    def _mark_scroll(self, _event=None) -> None:
+        self._scroll_until = time.monotonic() + SCROLL_PAUSE_SEC
 
     def _bind_scroll_pause(self) -> None:
-        """While the user scrolls, skip heavy panel redraws so scrolling stays smooth."""
-
-        def mark_scroll(_event=None) -> None:
-            self._scroll_until = time.monotonic() + 0.35
-
-        # Mouse wheel (Windows/macOS/Linux variants)
+        """Hard-pause ALL live widget updates while the user scrolls/drags."""
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            self.bind_all(seq, mark_scroll, add="+")
-        # Trackpad / scrollbar drag on the scrollable frame canvas when available
+            self.bind_all(seq, self._mark_scroll, add="+")
+
+        # CTkTextbox wraps a tk Text; bind wheel + scrollbar drag there too.
+        targets = [self.dashboard]
         try:
-            canvas = self.container._parent_canvas  # noqa: SLF001 - CTk internal
-            canvas.bind("<ButtonPress-1>", mark_scroll, add="+")
-            canvas.bind("<B1-Motion>", mark_scroll, add="+")
-            canvas.bind("<MouseWheel>", mark_scroll, add="+")
+            targets.append(self.dashboard._textbox)  # noqa: SLF001 - CTk internal
+        except Exception:
+            pass
+        for widget in targets:
+            try:
+                widget.bind("<MouseWheel>", self._mark_scroll, add="+")
+                widget.bind("<Button-4>", self._mark_scroll, add="+")
+                widget.bind("<Button-5>", self._mark_scroll, add="+")
+                widget.bind("<ButtonPress-1>", self._mark_scroll, add="+")
+                widget.bind("<B1-Motion>", self._mark_scroll, add="+")
+            except Exception:
+                pass
+
+    def _set_status(self, text: str) -> None:
+        if text == self._last_status:
+            return
+        self._last_status = text
+        self.status.configure(text=text)
+
+    def _set_dashboard(self, text: str) -> None:
+        if text == self._last_dashboard:
+            return
+        self._last_dashboard = text
+        # Preserve scroll position across live refreshes so the view does not jump.
+        try:
+            yview = self.dashboard.yview()
+        except Exception:
+            yview = (0.0, 1.0)
+        self.dashboard.configure(state="normal")
+        self.dashboard.delete("1.0", "end")
+        self.dashboard.insert("1.0", text)
+        self.dashboard.configure(state="disabled")
+        try:
+            self.dashboard.yview_moveto(yview[0])
         except Exception:
             pass
 
@@ -289,17 +506,22 @@ class SpecForgeApp(ctk.CTk):
                 self._dirty = False
 
         if err and snap is None:
-            self.status.configure(text=f"Collector error: {err}")
+            self._set_status(f"Collector error: {err}")
         elif snap is not None:
-            # Always keep header meters snappy; defer scroll content while scrolling.
-            self._render_header(snap)
-            if not scrolling and dirty and snap.collected_at != self._last_rendered_at:
-                self._render_panels(snap)
-                self._last_rendered_at = snap.collected_at
-            elif scrolling and dirty:
-                # Keep the dirty flag so panels catch up after scrolling stops.
-                with self._lock:
-                    self._dirty = True
+            if scrolling:
+                # Freeze meters + dashboard entirely; only a cheap status hint.
+                if dirty:
+                    with self._lock:
+                        self._dirty = True
+                if not self._scroll_hint_shown:
+                    self._set_status("Live · updates paused while scrolling")
+                    self._scroll_hint_shown = True
+            else:
+                self._scroll_hint_shown = False
+                self._render_header(snap)
+                if dirty and snap.collected_at != self._last_rendered_at:
+                    self._render_dashboard(snap)
+                    self._last_rendered_at = snap.collected_at
 
         if self._running:
             # ~10 FPS UI scheduler is enough; data itself arrives ~1 Hz.
@@ -316,7 +538,7 @@ class SpecForgeApp(ctk.CTk):
     def _render_header(self, snap: Snapshot) -> None:
         stamp = datetime.fromtimestamp(snap.collected_at).strftime("%H:%M:%S")
         state = "Paused" if self._paused else "Live"
-        self.status.configure(text=f"{state} · updated {stamp}")
+        self._set_status(f"{state} · updated {stamp}")
         self.cpu_meter.update_meter(
             snap.cpu.get("usage_percent"),
             f"{snap.cpu.get('usage_percent', 0):.1f}%",
@@ -333,160 +555,8 @@ class SpecForgeApp(ctk.CTk):
         self.cpu_temp_meter.update_meter(cpu_pct, cpu_label)
         self.gpu_temp_meter.update_meter(gpu_pct, gpu_label)
 
-    def _render_panels(self, snap: Snapshot) -> None:
-        sys = snap.system
-        self.sec_system.set_text(
-            "\n".join(
-                [
-                    f"Hostname     {sys.get('hostname')}",
-                    f"OS           {sys.get('os')}",
-                    f"Kernel       {sys.get('release')} ({sys.get('arch')})",
-                    f"Uptime       {_fmt_uptime(sys.get('uptime_sec', 0))}",
-                    f"Python       {sys.get('python')}",
-                ]
-            )
-        )
-
-        cores = snap.cpu.get("per_core_percent") or []
-        logical = snap.cpu.get("logical_cores")
-        try:
-            expected = int(logical) if logical is not None else len(cores)
-        except (TypeError, ValueError):
-            expected = len(cores)
-        # Size for collected samples; fall back to advertised logical count if samples empty.
-        self.sec_cpu.set_height(cpu_section_height(len(cores) or expected))
-        core_lines = []
-        for i, pct in enumerate(cores):
-            filled = min(10, max(0, int(pct // 10)))
-            bar = "#" * filled + "-" * (10 - filled)
-            core_lines.append(f"Core {i:02d}  [{bar}]  {pct:5.1f}%")
-        if expected and len(cores) < expected:
-            core_lines.append(
-                f"… only {len(cores)} of {expected} logical cores reported "
-                "(process may be affinity-limited or 32-bit)"
-            )
-        load = snap.cpu.get("load_avg") or []
-        load_txt = " / ".join(f"{x:.2f}" for x in load) if load else "n/a"
-        cpu_temp = snap.cpu.get("temp_c")
-        cpu_temp_txt = f"{cpu_temp:.1f} C" if isinstance(cpu_temp, (int, float)) else "unavailable"
-        self.sec_cpu.set_text(
-            "\n".join(
-                [
-                    f"Model        {snap.cpu.get('model')}",
-                    f"Cores        {snap.cpu.get('physical_cores')} physical · {snap.cpu.get('logical_cores')} logical",
-                    f"Frequency    {snap.cpu.get('freq_current_mhz') or 'n/a'} MHz (max {snap.cpu.get('freq_max_mhz') or 'n/a'})",
-                    f"CPU temp     {cpu_temp_txt}",
-                    f"Load avg     {load_txt}",
-                    "",
-                    *core_lines,
-                ]
-            )
-        )
-
-        self.sec_mem.set_text(
-            "\n".join(
-                [
-                    f"RAM used     {snap.memory.get('used')} / {snap.memory.get('total')} ({snap.memory.get('percent')}%)",
-                    f"Available    {snap.memory.get('available')}",
-                    f"Swap used    {snap.swap.get('used')} / {snap.swap.get('total')} ({snap.swap.get('percent')}%)",
-                ]
-            )
-        )
-
-        disk_lines = []
-        for d in snap.disks:
-            disk_lines.append(
-                f"{d['mount']}  {d['used']} / {d['total']} ({d['percent']}%)  [{d['fstype']}]"
-            )
-        io = snap.disk_io or {}
-        disk_lines.extend(
-            [
-                "",
-                f"Read         {io.get('read_human_s', 'n/a')}",
-                f"Write        {io.get('write_human_s', 'n/a')}",
-            ]
-        )
-        self.sec_disk.set_text("\n".join(disk_lines) if disk_lines else "No disks found")
-
-        if snap.gpu:
-            gpu_lines = []
-            for g in snap.gpu:
-                gpu_lines.append(f"{g.get('vendor', '?')}: {g.get('name')}")
-                temp = g.get("temp_c")
-                temp_txt = f"{temp:.1f} C" if isinstance(temp, (int, float)) else "unavailable"
-                if g.get("cuda_available") or g.get("vendor") == "NVIDIA":
-                    gpu_lines.extend(
-                        [
-                            f"  Temp       {temp_txt}",
-                            f"  Driver     {g.get('driver')}",
-                            f"  VRAM       {g.get('memory_used_mb')} / {g.get('memory_total_mb')} MB",
-                            f"  GPU util   {g.get('util_gpu_percent')}% · mem util {g.get('util_mem_percent')}%",
-                            f"  Power      {g.get('power_draw_w')} W / {g.get('power_limit_w')} W",
-                            f"  Clocks     SM {g.get('clock_sm_mhz')} · MEM {g.get('clock_mem_mhz')} MHz",
-                        ]
-                    )
-                else:
-                    gpu_lines.append(f"  Temp       {temp_txt}")
-                    if g.get("note"):
-                        gpu_lines.append(f"  {g['note']}")
-            cuda = snap.cuda or {}
-            gpu_lines.extend(
-                [
-                    "",
-                    f"CUDA toolkit {'detected - ' + str(cuda.get('nvcc_version')) if cuda.get('toolkit_detected') else 'not detected'}",
-                ]
-            )
-            if cuda.get("note") and not cuda.get("toolkit_detected"):
-                gpu_lines.append(cuda["note"])
-            self.sec_gpu.set_text("\n".join(gpu_lines))
-        else:
-            note = (snap.cuda or {}).get("note") or "No GPU devices detected."
-            self.sec_gpu.set_text(note)
-
-        power_lines = []
-        for p in snap.power:
-            power_lines.append(f"{p.get('name')}  ({p.get('type', p.get('status', 'power'))})")
-            for key in ("status", "capacity", "voltage_v", "current_a", "power_w", "online", "detail", "manufacturer", "model_name"):
-                if key in p and p[key] not in (None, ""):
-                    power_lines.append(f"  {key}: {p[key]}")
-        self.sec_power.set_text("\n".join(power_lines) if power_lines else "Power data unavailable")
-
-        net_lines = []
-        io = snap.net_io or {}
-        net_lines.append(f"Throughput   down {io.get('recv_human_s', 'n/a')}  up {io.get('sent_human_s', 'n/a')}")
-        net_lines.append("")
-        for n in snap.network[:12]:
-            up = "up" if n.get("isup") else "down"
-            net_lines.append(f"{n['name']} [{n['family']}] {n['address']} ({up})")
-        self.sec_net.set_text("\n".join(net_lines))
-
-        status = snap.temperature_status or {}
-        temp_lines = [
-            f"CPU temp     {status['cpu_c']:.1f} C" if isinstance(status.get("cpu_c"), (int, float)) else "CPU temp     unavailable",
-            f"GPU temp     {status['gpu_c']:.1f} C" if isinstance(status.get("gpu_c"), (int, float)) else "GPU temp     unavailable",
-        ]
-        sources = status.get("sources") or []
-        if sources:
-            temp_lines.append(f"Sources      {', '.join(sources)}")
-        temp_lines.append("")
-        if snap.temperatures:
-            for t in snap.temperatures[:12]:
-                src = t.get("source") or t.get("sensor") or "?"
-                temp_lines.append(f"{t['label']}: {t['current_c']:.1f} C  [{src}]")
-        notes = status.get("notes") or []
-        if notes:
-            temp_lines.append("")
-            temp_lines.append("How to enable missing temps:")
-            for note in notes:
-                temp_lines.append(f"- {note}")
-        self.sec_temp.set_text("\n".join(temp_lines))
-
-        proc_lines = ["PID     CPU%   MEM%   NAME", "-" * 48]
-        for p in snap.processes_top:
-            proc_lines.append(
-                f"{str(p['pid']):<7} {p['cpu_percent']:>5.1f}  {p['memory_percent']:>5.1f}  {p['name']}"
-            )
-        self.sec_proc.set_text("\n".join(proc_lines))
+    def _render_dashboard(self, snap: Snapshot) -> None:
+        self._set_dashboard(build_dashboard_text(snap))
 
     def _open_updates(self) -> None:
         UpdatesDialog(self)
@@ -494,7 +564,6 @@ class SpecForgeApp(ctk.CTk):
     def _on_close(self) -> None:
         self._running = False
         self.destroy()
-
 
 
 class UpdatesDialog(ctk.CTkToplevel):
