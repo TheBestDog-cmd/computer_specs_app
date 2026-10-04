@@ -32,6 +32,8 @@ pyinstaller --noconfirm --clean --onefile --noconsole --name SpecForge `
   --version-file $verinfo `
   --add-data "assets\specforge.ico;assets" `
   --add-data "assets\specforge.png;assets" `
+  --add-data "assets\specforge_32.png;assets" `
+  --add-data "assets\specforge_64.png;assets" `
   --collect-all customtkinter `
   main.py
 

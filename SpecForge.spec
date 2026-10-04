@@ -4,6 +4,8 @@ from PyInstaller.utils.hooks import collect_all
 datas = [
     ('assets/specforge.ico', 'assets'),
     ('assets/specforge.png', 'assets'),
+    ('assets/specforge_32.png', 'assets'),
+    ('assets/specforge_64.png', 'assets'),
 ]
 binaries = []
 hiddenimports = []
