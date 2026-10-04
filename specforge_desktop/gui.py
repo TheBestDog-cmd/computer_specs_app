@@ -8,7 +8,9 @@ from datetime import datetime
 
 import customtkinter as ctk
 
+from specforge_desktop import __version__
 from specforge_desktop.collector import SpecsCollector, Snapshot
+from specforge_desktop import updater
 
 
 ACCENT = "#0F7A6B"
@@ -158,6 +160,26 @@ class SpecForgeApp(ctk.CTk):
             command=self._toggle_pause,
         )
         self.pause_btn.pack(side="left")
+
+        self.updates_btn = ctk.CTkButton(
+            controls,
+            text="Updates",
+            width=110,
+            fg_color="#2F5D62",
+            hover_color=ACCENT_DEEP,
+            command=self._open_updates,
+        )
+        self.updates_btn.pack(side="left", padx=(10, 0))
+
+        self.web_btn = ctk.CTkButton(
+            controls,
+            text="GitHub",
+            width=90,
+            fg_color="#3D6B74",
+            hover_color=ACCENT_DEEP,
+            command=lambda: updater.open_github(),
+        )
+        self.web_btn.pack(side="left", padx=(10, 0))
 
         self.status = ctk.CTkLabel(controls, text="Starting…", text_color=MUTED, font=ctk.CTkFont(size=12))
         self.status.pack(side="left", padx=14)
@@ -402,9 +424,119 @@ class SpecForgeApp(ctk.CTk):
             )
         self.sec_proc.set_text("\n".join(proc_lines))
 
+    def _open_updates(self) -> None:
+        UpdatesDialog(self)
+
     def _on_close(self) -> None:
         self._running = False
         self.destroy()
+
+
+
+class UpdatesDialog(ctk.CTkToplevel):
+    def __init__(self, master: SpecForgeApp):
+        super().__init__(master)
+        self.title("SpecForge Updates")
+        self.geometry("560x420")
+        self.resizable(False, False)
+        self.configure(fg_color="#E8F0EC")
+        self.transient(master)
+        self.after(50, self.lift)
+        self.after(80, self.focus_force)
+
+        ctk.CTkLabel(
+            self,
+            text="GitHub updates",
+            font=ctk.CTkFont(size=22, weight="bold"),
+            text_color=ACCENT_DEEP,
+        ).pack(anchor="w", padx=20, pady=(18, 4))
+
+        ctk.CTkLabel(
+            self,
+            text="Check the web repo, pull the latest main branch, or open GitHub in your browser.",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+            wraplength=520,
+            justify="left",
+        ).pack(anchor="w", padx=20, pady=(0, 12))
+
+        self.info = ctk.CTkTextbox(self, height=180, font=ctk.CTkFont(family="Consolas", size=12))
+        self.info.pack(fill="both", expand=True, padx=20, pady=(0, 12))
+        self.info.insert("1.0", f"App version: {__version__}\nChecking GitHub…")
+        self.info.configure(state="disabled")
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=(0, 18))
+
+        self.check_btn = ctk.CTkButton(row, text="Check", width=100, fg_color=ACCENT, hover_color=ACCENT_DEEP, command=self._check)
+        self.check_btn.pack(side="left")
+        self.pull_btn = ctk.CTkButton(row, text="Pull update", width=120, fg_color="#2F5D62", hover_color=ACCENT_DEEP, command=self._pull)
+        self.pull_btn.pack(side="left", padx=8)
+        self.web_btn = ctk.CTkButton(row, text="Open GitHub", width=120, fg_color="#3D6B74", hover_color=ACCENT_DEEP, command=lambda: updater.open_github())
+        self.web_btn.pack(side="left")
+        self.releases_btn = ctk.CTkButton(row, text="Releases", width=100, fg_color="#3D6B74", hover_color=ACCENT_DEEP, command=updater.open_releases)
+        self.releases_btn.pack(side="left", padx=8)
+
+        self.after(100, self._check)
+
+    def _set_info(self, text: str) -> None:
+        self.info.configure(state="normal")
+        self.info.delete("1.0", "end")
+        self.info.insert("1.0", text)
+        self.info.configure(state="disabled")
+
+    def _busy(self, busy: bool) -> None:
+        state = "disabled" if busy else "normal"
+        for btn in (self.check_btn, self.pull_btn, self.web_btn, self.releases_btn):
+            btn.configure(state=state)
+
+    def _check(self) -> None:
+        self._busy(True)
+        self._set_info(f"App version: {__version__}\nChecking GitHub…")
+
+        def work():
+            try:
+                info = updater.check_for_updates(__version__)
+                lines = [
+                    f"App version     {info.local_version}",
+                    f"Install mode    {info.mode}",
+                    f"Local commit    {info.local_commit or 'unknown'}",
+                    f"GitHub commit   {info.remote_commit or 'unknown'}",
+                    f"Commit date     {info.remote_date or 'n/a'}",
+                    f"Commit message  {info.remote_message or 'n/a'}",
+                    f"Release tag     {info.release_tag or 'none yet'}",
+                    "",
+                    ("UPDATE AVAILABLE" if info.update_available else "UP TO DATE"),
+                    info.detail,
+                    "",
+                    "Pull update uses git pull when this folder is a git checkout,",
+                    "otherwise it downloads the latest source ZIP from GitHub.",
+                    "After updating source, rebuild the Windows exe if you use SpecForge.exe.",
+                ]
+                msg = "\n".join(lines)
+            except Exception as exc:  # noqa: BLE001
+                msg = f"Could not check GitHub:\n{exc}"
+            self.after(0, lambda: self._done(msg))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _done(self, msg: str) -> None:
+        self._set_info(msg)
+        self._busy(False)
+
+    def _pull(self) -> None:
+        self._busy(True)
+        self._set_info("Pulling latest from GitHub…")
+
+        def work():
+            try:
+                result = updater.apply_update()
+                msg = result + "\n\nRestart SpecForge to load code changes."
+            except Exception as exc:  # noqa: BLE001
+                msg = f"Update failed:\n{exc}"
+            self.after(0, lambda: self._done(msg))
+
+        threading.Thread(target=work, daemon=True).start()
 
 
 def run_app() -> None:

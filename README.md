@@ -115,6 +115,25 @@ Then double-click `dist\SpecForge.exe` anytime. No Python install is required on
 
 `--noconsole` keeps SpecForge GUI-only. Rebuild after pulling updates so `nvidia-smi` refresh calls do not flash a CMD window every second.
 
+
+### Updates from GitHub
+
+In the SpecForge window, use:
+
+- **GitHub** — open the repository in your browser
+- **Updates** — check GitHub `main` for newer commits and **Pull update**
+
+Pull behavior:
+
+- If the folder is a git checkout: runs `git pull origin main`
+- Otherwise: downloads the latest source ZIP from GitHub into the project (or `computer_specs_app-src` next to the exe)
+
+After pulling source updates, rebuild the Windows exe:
+
+```bat
+scripts\build_executable.bat
+```
+
 ### Tests
 
 ```powershell
