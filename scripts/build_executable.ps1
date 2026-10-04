@@ -1,4 +1,8 @@
 # Build SpecForge.exe on native Windows (PowerShell). No WSL required.
+# If blocked by execution policy, run:
+#   powershell -ExecutionPolicy Bypass -File .\scripts\build_executable.ps1
+# Or use Command Prompt instead:
+#   scripts\build_executable.bat
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 

@@ -63,14 +63,30 @@ python main.py
 Do **not** use `bash scripts/build_executable.sh` on Windows unless you intentionally use WSL.
 Build with native Windows Python instead.
 
-**PowerShell (recommended)**
+**Easiest: Command Prompt (cmd)** — no execution-policy issues
+
+```bat
+cd %USERPROFILE%\Desktop\computer_specs_app-main
+scripts\build_executable.bat
+```
+
+**PowerShell**
+
+If you get “not digitally signed” / `UnauthorizedAccess`, either use the `.bat` file above, or bypass policy for one run:
 
 ```powershell
 cd $HOME\Desktop\computer_specs_app-main
+powershell -ExecutionPolicy Bypass -File .\scripts\build_executable.ps1
+```
+
+Or allow local scripts for your user (one-time):
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 .\scripts\build_executable.ps1
 ```
 
-Or step-by-step:
+**PowerShell step-by-step (no script file)**
 
 ```powershell
 cd $HOME\Desktop\computer_specs_app-main
@@ -80,14 +96,7 @@ pip install -r requirements.txt
 pyinstaller --noconfirm --clean --onefile --noconsole --name SpecForge --collect-all customtkinter main.py
 ```
 
-**Command Prompt (cmd)**
-
-```bat
-cd %USERPROFILE%\Desktop\computer_specs_app-main
-scripts\build_executable.bat
-```
-
-Or step-by-step:
+**Command Prompt step-by-step**
 
 ```bat
 cd %USERPROFILE%\Desktop\computer_specs_app-main
