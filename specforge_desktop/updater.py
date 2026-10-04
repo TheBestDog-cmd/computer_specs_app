@@ -436,6 +436,9 @@ def _windows_update_ps1(
         else "# no commit marker\n"
     )
 
+    stale_cmd_pat = r"^(cmd|wscript|cscript)\.exe$"
+    stale_line_pat = r"_specforge_update\.bat|SpecForge\.exe\.new"
+
     ps = f"""$ErrorActionPreference = 'Continue'
 $exe = '{exe_lit}'
 $new = '{new_lit}'
@@ -449,26 +452,44 @@ function Log([string]$msg) {{
 Set-Content -LiteralPath $log -Value '' -Encoding UTF8
 Log "SpecForge silent update starting (wait PID $pidToWait)"
 
-
+# Wait briefly for the installing process to exit, then FORCE-kill any leftover
+# SpecForge.exe. Never spin forever (old bat helpers hung with a blank console).
 try {{
   $proc = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue
   if ($proc) {{
-    Log "Waiting for process $pidToWait to exit"
-    Wait-Process -Id $pidToWait -Timeout 120 -ErrorAction SilentlyContinue
+    Log "Waiting up to 20s for PID $pidToWait"
+    Wait-Process -Id $pidToWait -Timeout 20 -ErrorAction SilentlyContinue
   }}
 }} catch {{
   Log "Wait-Process: $_"
 }}
 
-# Also wait until no SpecForge.exe image remains (covers child/restart races).
-for ($i = 0; $i -lt 90; $i++) {{
-  $alive = Get-Process -Name 'SpecForge' -ErrorAction SilentlyContinue
-  if (-not $alive) {{ break }}
-  Start-Sleep -Milliseconds 500
+$alive = @(Get-Process -Name 'SpecForge' -ErrorAction SilentlyContinue)
+if ($alive.Count -gt 0) {{
+  Log ("Force-stopping remaining SpecForge processes: " + (($alive | ForEach-Object {{ $_.Id }}) -join ','))
+  Stop-Process -Name 'SpecForge' -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
 }}
-Log "Process clear; settling and cleaning _MEI extract dirs"
 
-Start-Sleep -Seconds 4
+# Kill leftover visible updaters from older SpecForge builds (blank cmd windows).
+# Do NOT match this PowerShell process (its command line also contains _specforge_update).
+$myPid = $PID
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+  Where-Object {{
+    $_.ProcessId -ne $myPid -and
+    $_.Name -match '{stale_cmd_pat}' -and
+    $_.CommandLine -and
+    ($_.CommandLine -match '{stale_line_pat}')
+  }} |
+  ForEach-Object {{
+    try {{
+      Log ("Stopping stale updater PID $($_.ProcessId): $($_.Name)")
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
+    }} catch {{}}
+  }}
+
+Log "Process clear; settling and cleaning _MEI extract dirs"
+Start-Sleep -Seconds 3
 
 # Stale PyInstaller one-file unpack dirs cause: Failed to load Python DLL ... python312.dll
 Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter '_MEI*' -ErrorAction SilentlyContinue |
