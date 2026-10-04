@@ -470,7 +470,7 @@ class UpdatesDialog(ctk.CTkToplevel):
 
         self.check_btn = ctk.CTkButton(row, text="Check", width=100, fg_color=ACCENT, hover_color=ACCENT_DEEP, command=self._check)
         self.check_btn.pack(side="left")
-        self.pull_btn = ctk.CTkButton(row, text="Pull update", width=120, fg_color="#2F5D62", hover_color=ACCENT_DEEP, command=self._pull)
+        self.pull_btn = ctk.CTkButton(row, text="Update now", width=120, fg_color="#2F5D62", hover_color=ACCENT_DEEP, command=self._pull)
         self.pull_btn.pack(side="left", padx=8)
         self.web_btn = ctk.CTkButton(row, text="Open GitHub", width=120, fg_color="#3D6B74", hover_color=ACCENT_DEEP, command=lambda: updater.open_github())
         self.web_btn.pack(side="left")
@@ -530,13 +530,32 @@ class UpdatesDialog(ctk.CTkToplevel):
 
         def work():
             try:
-                result = updater.apply_update()
-                msg = result + "\n\nRestart SpecForge to load code changes."
+                result, should_restart = updater.apply_update()
+                msg = result
+                if should_restart:
+                    msg += "\n\nClosing SpecForge so the new exe can start…"
+                else:
+                    msg += "\n\nRestart SpecForge to load code changes."
             except Exception as exc:  # noqa: BLE001
+                result = None
+                should_restart = False
                 msg = f"Update failed:\n{exc}"
-            self.after(0, lambda: self._done(msg))
+
+            def finish():
+                self._done(msg)
+                if should_restart:
+                    # Give the UI a moment to show the message, then exit for the swap script.
+                    self.after(1200, self._restart_for_exe_update)
+
+            self.after(0, finish)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _restart_for_exe_update(self) -> None:
+        try:
+            self.master.destroy()
+        except Exception:
+            pass
 
 
 def run_app() -> None:

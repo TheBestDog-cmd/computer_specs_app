@@ -1,9 +1,8 @@
-"""Check GitHub for SpecForge updates and pull the latest source."""
+"""Check GitHub for SpecForge updates and apply source or exe updates."""
 
 from __future__ import annotations
 
 import json
-import os
 import platform
 import shutil
 import subprocess
@@ -15,7 +14,7 @@ import webbrowser
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 GITHUB_OWNER = "TheBestDog-cmd"
 GITHUB_REPO = "computer_specs_app"
@@ -24,7 +23,9 @@ REPO_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}"
 API_COMMIT = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/commits/{GITHUB_BRANCH}"
 API_RELEASE = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 ZIPBALL_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
-USER_AGENT = "SpecForge-Updater/1.1"
+USER_AGENT = "SpecForge-Updater/1.2"
+EXE_ASSET_NAME = "SpecForge.exe"
+VERSION_ASSET_NAME = "version.json"
 
 
 @dataclass
@@ -39,6 +40,9 @@ class UpdateInfo:
     update_available: bool
     mode: str  # git | source | exe
     detail: str
+    exe_asset_url: str | None = None
+    remote_version: str | None = None
+    can_update_exe: bool = False
 
 
 def project_root() -> Path:
@@ -46,6 +50,12 @@ def project_root() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent
+
+
+def current_executable() -> Path | None:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
+    return None
 
 
 def _subprocess_kwargs() -> dict[str, Any]:
@@ -76,8 +86,34 @@ def _http_json(url: str) -> dict[str, Any]:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _http_download(
+    url: str,
+    dest: Path,
+    progress: Callable[[int, int | None], None] | None = None,
+) -> None:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=180) as resp, open(dest, "wb") as out:
+        total = resp.headers.get("Content-Length")
+        total_i = int(total) if total and total.isdigit() else None
+        read = 0
+        while True:
+            chunk = resp.read(1024 * 256)
+            if not chunk:
+                break
+            out.write(chunk)
+            read += len(chunk)
+            if progress:
+                progress(read, total_i)
+
+
 def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=str(cwd) if cwd else None, timeout=120, check=False, **_subprocess_kwargs())
+    return subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        timeout=120,
+        check=False,
+        **_subprocess_kwargs(),
+    )
 
 
 def detect_mode(root: Path | None = None) -> str:
@@ -91,10 +127,12 @@ def detect_mode(root: Path | None = None) -> str:
 
 def local_commit(root: Path | None = None) -> str | None:
     root = root or project_root()
+    marker = root / ".specforge_commit"
+    if marker.exists():
+        value = marker.read_text(encoding="utf-8").strip()[:40]
+        if value:
+            return value
     if not (root / ".git").exists() or not shutil.which("git"):
-        marker = root / ".specforge_commit"
-        if marker.exists():
-            return marker.read_text(encoding="utf-8").strip()[:40] or None
         return None
     result = _run(["git", "rev-parse", "HEAD"], cwd=root)
     if result.returncode != 0:
@@ -111,14 +149,18 @@ def fetch_remote_commit() -> tuple[str | None, str | None, str | None]:
     return (sha[:40] if sha else None, message, date)
 
 
-def fetch_latest_release() -> tuple[str | None, str | None]:
+def fetch_latest_release() -> dict[str, Any] | None:
     try:
-        data = _http_json(API_RELEASE)
+        return _http_json(API_RELEASE)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            return None, None
+            return None
         raise
-    return data.get("tag_name"), data.get("html_url")
+
+
+def _asset_map(release: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    assets = release.get("assets") or []
+    return {a.get("name"): a for a in assets if a.get("name")}
 
 
 def check_for_updates(local_version: str) -> UpdateInfo:
@@ -126,23 +168,49 @@ def check_for_updates(local_version: str) -> UpdateInfo:
     mode = detect_mode(root)
     local = local_commit(root)
     remote, message, date = fetch_remote_commit()
-    release_tag, release_url = fetch_latest_release()
+    release = fetch_latest_release()
+    release_tag = release.get("tag_name") if release else None
+    release_url = release.get("html_url") if release else None
+
+    exe_url = None
+    remote_version = None
+    can_update_exe = False
+    if release:
+        assets = _asset_map(release)
+        exe_asset = assets.get(EXE_ASSET_NAME)
+        if exe_asset and exe_asset.get("browser_download_url"):
+            exe_url = exe_asset["browser_download_url"]
+            can_update_exe = True
+        version_asset = assets.get(VERSION_ASSET_NAME)
+        if version_asset and version_asset.get("browser_download_url"):
+            try:
+                meta = _http_json(version_asset["browser_download_url"])
+                remote_version = meta.get("version")
+                if meta.get("commit"):
+                    remote = str(meta["commit"])[:40]
+            except Exception:
+                pass
 
     if remote and local:
         available = remote.lower() != local.lower()
         detail = (
-            "A newer commit is on GitHub."
+            "A newer build is on GitHub."
             if available
-            else "You are up to date with GitHub main."
+            else "You are up to date with GitHub."
         )
     elif remote and not local:
         available = True
-        detail = "Could not determine local commit; GitHub main is available to pull/download."
+        detail = "Local build marker missing; GitHub has a published build/commit available."
     else:
         available = False
-        detail = "Could not read the latest GitHub commit."
+        detail = "Could not read the latest GitHub commit/release."
 
-    if mode == "exe" and release_tag:
+    if mode == "exe":
+        if can_update_exe:
+            detail += " Pull update will download SpecForge.exe and replace this app on restart."
+        else:
+            detail += " No SpecForge.exe release asset found yet (CI may still be publishing)."
+    elif release_tag:
         detail += f" Latest release tag: {release_tag}."
 
     return UpdateInfo(
@@ -156,6 +224,9 @@ def check_for_updates(local_version: str) -> UpdateInfo:
         update_available=available,
         mode=mode,
         detail=detail,
+        exe_asset_url=exe_url,
+        remote_version=remote_version,
+        can_update_exe=can_update_exe,
     )
 
 
@@ -181,7 +252,6 @@ def pull_with_git(root: Path | None = None) -> str:
 
     pull = _run(["git", "pull", "--ff-only", "origin", GITHUB_BRANCH], cwd=root)
     if pull.returncode != 0:
-        # Fall back to reset --hard only if user is on a clean detached/simple copy? Safer to report.
         raise RuntimeError((pull.stderr or pull.stdout or "git pull failed").strip())
 
     sha = local_commit(root) or "unknown"
@@ -192,7 +262,6 @@ def download_source_update(root: Path | None = None) -> str:
     """Download main.zip from GitHub and merge source files into the project root."""
     root = root or project_root()
     if getattr(sys, "frozen", False):
-        # Keep source next to the exe so users can rebuild.
         target = root / "computer_specs_app-src"
         target.mkdir(parents=True, exist_ok=True)
     else:
@@ -206,8 +275,9 @@ def download_source_update(root: Path | None = None) -> str:
             shutil.copyfileobj(resp, out)
         with zipfile.ZipFile(zip_path) as zf:
             zf.extractall(tmp_path)
-        extracted = next(p for p in tmp_path.iterdir() if p.is_dir() and p.name.startswith(GITHUB_REPO))
-        # Copy over source files, skip venv/build artifacts
+        extracted = next(
+            p for p in tmp_path.iterdir() if p.is_dir() and p.name.startswith(GITHUB_REPO)
+        )
         skip = {".venv", "venv", "node_modules", "dist", "build", ".git", "__pycache__"}
         for src in extracted.rglob("*"):
             rel = src.relative_to(extracted)
@@ -220,7 +290,6 @@ def download_source_update(root: Path | None = None) -> str:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dest)
 
-        # Persist remote commit marker when possible
         try:
             remote, _, _ = fetch_remote_commit()
             if remote:
@@ -230,15 +299,98 @@ def download_source_update(root: Path | None = None) -> str:
 
     if getattr(sys, "frozen", False):
         return (
-            f"Downloaded latest source to:\\n{target}\\n\\n"
-            "Rebuild the exe with scripts\\\\build_executable.bat (CMD) "
-            "or scripts\\\\build_executable.ps1 (PowerShell Bypass)."
+            f"Downloaded latest source to:\n{target}\n\n"
+            "No exe asset was available, so rebuild SpecForge.exe with "
+            "scripts\\build_executable.bat after opening that folder."
         )
-    return f"Downloaded and applied latest source from GitHub into:\\n{target}"
+    return f"Downloaded and applied latest source from GitHub into:\n{target}"
 
 
-def apply_update() -> str:
+def _windows_replace_script(exe_path: Path, new_path: Path, commit: str | None) -> Path:
+    script = exe_path.parent / "_specforge_update.bat"
+    commit_line = ""
+    if commit:
+        marker = exe_path.parent / ".specforge_commit"
+        commit_line = f'echo {commit}> "{marker}"\r\n'
+    lines = [
+        "@echo off",
+        "setlocal",
+        f'set "EXE={exe_path}"',
+        f'set "NEW={new_path}"',
+        ":wait",
+        "ping 127.0.0.1 -n 2 >nul",
+        'del "%EXE%" >nul 2>nul',
+        'if exist "%EXE%" goto wait',
+        'move /y "%NEW%" "%EXE%" >nul',
+        commit_line.rstrip("\r\n"),
+        'start "" "%EXE%"',
+        'del "%~f0" >nul 2>nul',
+        "",
+    ]
+    script.write_text("\r\n".join(line for line in lines if line is not None), encoding="utf-8")
+    return script
+
+
+def download_and_replace_exe(
+    asset_url: str | None = None,
+    remote_commit: str | None = None,
+    progress: Callable[[int, int | None], None] | None = None,
+) -> str:
+    """Download SpecForge.exe from GitHub Releases and schedule a replace+restart."""
+    if platform.system() != "Windows":
+        raise RuntimeError("Automatic exe replacement is currently supported on Windows.")
+    exe = current_executable()
+    if exe is None:
+        raise RuntimeError("Not running as a frozen SpecForge.exe.")
+
+    if not asset_url:
+        info = check_for_updates("0")
+        asset_url = info.exe_asset_url
+        remote_commit = remote_commit or info.remote_commit
+        if not asset_url:
+            raise RuntimeError(
+                "No SpecForge.exe found in the latest GitHub Release yet. "
+                "Wait for the Release workflow on main to finish, then try again."
+            )
+
+    new_path = exe.with_suffix(exe.suffix + ".new")
+    if new_path.exists():
+        new_path.unlink()
+    _http_download(asset_url, new_path, progress=progress)
+    if new_path.stat().st_size < 1_000_000:
+        raise RuntimeError("Downloaded exe looks too small; aborting update.")
+
+    script = _windows_replace_script(exe, new_path, remote_commit)
+    # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so updater survives app exit.
+    flags = 0x00000008 | 0x00000200
+    subprocess.Popen(
+        ["cmd.exe", "/c", str(script)],
+        cwd=str(exe.parent),
+        creationflags=flags,
+        close_fds=True,
+    )
+    return (
+        "Downloaded the latest SpecForge.exe from GitHub Releases.\n"
+        "SpecForge will close and restart with the new build."
+    )
+
+
+def apply_update(progress: Callable[[int, int | None], None] | None = None) -> tuple[str, bool]:
+    """Apply update.
+
+    Returns (message, should_restart_app).
+    """
     mode = detect_mode()
+    if mode == "exe":
+        info = check_for_updates("0")
+        if info.can_update_exe and info.exe_asset_url:
+            msg = download_and_replace_exe(
+                info.exe_asset_url,
+                info.remote_commit,
+                progress=progress,
+            )
+            return msg, True
+        return download_source_update(), False
     if mode == "git":
-        return pull_with_git()
-    return download_source_update()
+        return pull_with_git(), False
+    return download_source_update(), False

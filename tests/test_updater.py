@@ -10,3 +10,9 @@ def test_project_root_exists():
 def test_detect_mode_source_or_git():
     mode = updater.detect_mode()
     assert mode in {"git", "source", "exe"}
+
+
+def test_apply_update_signature():
+    # apply_update returns (message, should_restart)
+    assert callable(updater.apply_update)
+    assert callable(updater.download_and_replace_exe)

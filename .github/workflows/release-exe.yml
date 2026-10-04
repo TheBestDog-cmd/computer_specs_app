@@ -1,0 +1,64 @@
+name: Release SpecForge.exe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build SpecForge.exe
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python -m pip install --upgrade pip
+          .\.venv\Scripts\pip install -r requirements.txt
+          .\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --noconsole --name SpecForge --collect-all customtkinter main.py
+          if (-not (Test-Path "dist\SpecForge.exe")) { throw "SpecForge.exe was not built" }
+
+      - name: Write release metadata
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path specforge_desktop\__init__.py -Pattern '__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $meta = @{
+            version = $version
+            commit = "${{ github.sha }}"
+            tag = "latest"
+            repo = "${{ github.repository }}"
+            built_at = (Get-Date).ToUniversalTime().ToString("o")
+          } | ConvertTo-Json
+          Set-Content -Path dist\version.json -Value $meta -Encoding utf8
+          Set-Content -Path dist\.specforge_commit -Value "${{ github.sha }}" -Encoding utf8
+
+      - name: Publish latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          target_commitish: ${{ github.sha }}
+          name: SpecForge latest (auto)
+          body: |
+            Automatic Windows build from `main`.
+
+            - Commit: `${{ github.sha }}`
+
+            In SpecForge, open **Updates** → **Pull update** to download and replace `SpecForge.exe`.
+          files: |
+            dist/SpecForge.exe
+            dist/version.json
+          fail_on_unmatched_files: true
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
