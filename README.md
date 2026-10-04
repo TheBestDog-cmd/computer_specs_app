@@ -4,7 +4,7 @@
 
 ## Desktop app (Python GUI)
 
-Track live inventory and usage for CPU, memory, disks, network, GPU/CUDA, power, temperatures, and top processes.
+Track live inventory and usage for CPU, memory, disks, network, GPU/CUDA, temperatures, and top processes.
 
 ### Requirements
 
@@ -52,9 +52,20 @@ Output: `dist\SpecForge.exe`
 
 Build with **64-bit Python** (the scripts refuse 32-bit). A 32-bit exe can under-report logical CPUs on Windows.
 
-### CPU cores panel
+### Live dashboard & scrolling
 
-The CPU panel lists every logical core from `psutil.cpu_percent(percpu=True)`. It is scrollable and sized for typical 8–16-core machines (taller lists scroll inside the panel).
+Lower panels live in one scrollable text dashboard (not a multi-frame scroll container) so wheel/scrollbar motion stays smooth while monitoring. Live meter and dashboard redraws pause briefly while you scroll, then catch up. Per-core bars come from `psutil.cpu_percent(percpu=True)`; machines with many logical cores show a compact summary plus the first/last cores.
+
+### If update fails with “Failed to load Python DLL”
+
+That PyInstaller temp-extract error usually means the new exe launched before the old process finished cleaning up, or Windows Defender interfered with the unpack.
+
+SpecForge 1.3.5+ waits for the old process to exit, verifies the download checksum, unblocks the new file, then relaunches. If it still fails:
+
+1. Close SpecForge completely (Task Manager → end `SpecForge.exe` if needed)
+2. Delete `%TEMP%\_MEI*` folders if present
+3. Re-download `SpecForge.exe` from GitHub Releases, or run **Updates → Update now** again
+4. Optionally install the latest [Microsoft VC++ x64 redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
 
 ### Temperatures on Windows (CPU / GPU)
 
@@ -67,7 +78,7 @@ Windows does **not** expose CPU package temperature through normal APIs (`psutil
 | **CPU** | LibreHardwareMonitor or OpenHardwareMonitor WMI | Install [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor), **run it (often as Administrator)**, and **leave it open** |
 | **ACPI zones** | `MSAcpi_ThermalZoneTemperature` | Sometimes needs Admin; often inaccurate board zones, not true CPU package |
 
-In the app, CPU/GPU temps appear as header meters and again in the **Temperatures** panel (with setup hints when a reading is unavailable).
+In the app, CPU/GPU temps appear as header meters and again in the **Temperatures** section of the live dashboard, grouped by CPU / GPU / board / other (with setup hints when a reading is unavailable).
 
 Quick checks on your PC:
 

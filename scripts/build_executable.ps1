@@ -24,7 +24,13 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 
 # --noconsole = GUI-only (no console attached to SpecForge itself)
-pyinstaller --noconfirm --clean --onefile --noconsole --name SpecForge --collect-all customtkinter main.py
+# --icon = desktop/taskbar/exe icon matching the in-app window icon
+pyinstaller --noconfirm --clean --onefile --noconsole --name SpecForge `
+  --icon assets\specforge.ico `
+  --add-data "assets\specforge.ico;assets" `
+  --add-data "assets\specforge.png;assets" `
+  --collect-all customtkinter `
+  main.py
 
 $exe = Join-Path (Get-Location) "dist\SpecForge.exe"
 if (Test-Path $exe) {

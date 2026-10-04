@@ -551,14 +551,29 @@ def _temperature_guidance(*, platform_name: str, rows: list[dict[str, Any]], gpu
             if nvidia_present and not nvidia_smi:
                 notes.append("An NVIDIA GPU was detected earlier, but nvidia-smi is not callable from SpecForge.")
     else:
-        if not rows:
-            notes.append(
-                "No temperature sensors exposed on this host (common on VMs/cloud images without hwmon)."
-            )
-        elif not has_cpu:
-            notes.append("CPU temperature sensors were not found in hwmon/psutil.")
-        if not has_gpu and not nvidia_smi:
-            notes.append("GPU temperature needs nvidia-smi (NVIDIA) or vendor tools (AMD ROCm / amd-smi).")
+        if not has_cpu:
+            if not rows:
+                notes.append(
+                    "CPU temp unavailable: no hwmon/thermal sensors exposed on this host "
+                    "(common on VMs/cloud images). On bare metal Linux, install lm-sensors "
+                    "and run `sensors-detect`, or ensure `/sys/class/hwmon` is populated."
+                )
+            else:
+                notes.append(
+                    "CPU temperature sensors were not found in hwmon/psutil "
+                    "(only non-CPU sensors were reported)."
+                )
+        if not has_gpu:
+            if nvidia_smi:
+                notes.append(
+                    "GPU temp unavailable even though nvidia-smi was found. "
+                    "Confirm the NVIDIA driver is working (`nvidia-smi` in a terminal)."
+                )
+            else:
+                notes.append(
+                    "GPU temperature needs nvidia-smi (NVIDIA) or vendor tools "
+                    "(AMD ROCm / amd-smi)."
+                )
     return notes
 
 
