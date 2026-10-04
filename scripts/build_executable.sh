@@ -15,7 +15,8 @@ pyinstaller \
   --onefile \
   --noconsole \
   --name SpecForge \
-  --icon assets/specforge.ico \
+  --icon "$ROOT/assets/specforge.ico" \
+  --version-file "$ROOT/assets/version_info.txt" \
   --add-data "assets/specforge.ico:assets" \
   --add-data "assets/specforge.png:assets" \
   --collect-all customtkinter \

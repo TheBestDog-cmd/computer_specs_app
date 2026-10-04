@@ -25,8 +25,11 @@ pip install -r requirements.txt
 
 # --noconsole = GUI-only (no console attached to SpecForge itself)
 # --icon = desktop/taskbar/exe icon matching the in-app window icon
+$icon = Join-Path (Get-Location) "assets\specforge.ico"
+$verinfo = Join-Path (Get-Location) "assets\version_info.txt"
 pyinstaller --noconfirm --clean --onefile --noconsole --name SpecForge `
-  --icon assets\specforge.ico `
+  --icon $icon `
+  --version-file $verinfo `
   --add-data "assets\specforge.ico;assets" `
   --add-data "assets\specforge.png;assets" `
   --collect-all customtkinter `

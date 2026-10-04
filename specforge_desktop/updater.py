@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -406,77 +407,177 @@ def verify_downloaded_exe(path: Path, expected_sha256: str | None = None) -> Non
             )
 
 
-def _windows_replace_script(exe_path: Path, new_path: Path, commit: str | None) -> Path:
-    """Write a robust Windows swap script.
+def _windows_update_ps1(
+    exe_path: Path,
+    new_path: Path,
+    commit: str | None,
+    pid: int,
+) -> Path:
+    """Write a hidden PowerShell swap script (no visible CMD windows).
 
-    A short wait/move race can relaunch SpecForge before the old onefile process
-    finishes _MEI cleanup, which shows up as:
-    Failed to load Python DLL ... _MEI...\\python312.dll
+    Waits for *this* SpecForge PID to exit, clears leftover PyInstaller _MEI
+    extract dirs (the usual python312.dll failure), copies the new exe, then
+    relaunches — all with -WindowStyle Hidden.
     """
-    script = exe_path.parent / "_specforge_update.bat"
+    script = exe_path.parent / "_specforge_update.ps1"
     log = exe_path.parent / "_specforge_update.log"
     marker = exe_path.parent / ".specforge_commit"
-    commit_echo = f'echo {commit}> "{marker}"' if commit else "rem no commit marker"
-    unblock = (
-        'powershell -NoProfile -ExecutionPolicy Bypass -Command '
-        '"try { Unblock-File -LiteralPath $env:EXE } catch { }"'
+    commit_lit = commit.replace("'", "''") if commit else ""
+    # PowerShell single-quoted paths; double any embedded single quotes.
+    exe_lit = str(exe_path).replace("'", "''")
+    new_lit = str(new_path).replace("'", "''")
+    log_lit = str(log).replace("'", "''")
+    dir_lit = str(exe_path.parent).replace("'", "''")
+    marker_lit = str(marker).replace("'", "''")
+
+    commit_block = (
+        f"Set-Content -LiteralPath '{marker_lit}' -Value '{commit_lit}' -Encoding ASCII\n"
+        if commit
+        else "# no commit marker\n"
     )
-    lines = [
-        "@echo off",
-        "setlocal EnableExtensions",
-        f'set "EXE={exe_path}"',
-        f'set "NEW={new_path}"',
-        f'set "LOG={log}"',
-        f'set "DIR={exe_path.parent}"',
-        'echo SpecForge update started %DATE% %TIME%> "%LOG%"',
-        "rem Wait until SpecForge.exe is no longer running (file lock released).",
-        "set /a _tries=0",
-        ":wait_proc",
-        'tasklist /FI "IMAGENAME eq SpecForge.exe" | find /I "SpecForge.exe" >nul',
-        "if errorlevel 1 goto unlocked",
-        "set /a _tries+=1",
-        "if %_tries% GEQ 90 (",
-        '  echo Timed out waiting for SpecForge.exe to exit>> "%LOG%"',
-        "  goto fail",
-        ")",
-        "timeout /t 1 /nobreak >nul",
-        "goto wait_proc",
-        ":unlocked",
-        'echo Process exited; settling before file swap>> "%LOG%"',
-        "rem Extra settle time so the old onefile _MEI extract dir can finish cleanup.",
-        "timeout /t 3 /nobreak >nul",
-        ":wait_del",
-        'del /F /Q "%EXE%" >nul 2>nul',
-        'if exist "%EXE%" (',
-        "  timeout /t 1 /nobreak >nul",
-        "  goto wait_del",
-        ")",
-        'if not exist "%NEW%" (',
-        '  echo Missing downloaded file %NEW%>> "%LOG%"',
-        "  goto fail",
-        ")",
-        'echo Copying new exe into place>> "%LOG%"',
-        'copy /Y "%NEW%" "%EXE%" >> "%LOG%" 2>&1',
-        "if errorlevel 1 (",
-        '  echo copy failed>> "%LOG%"',
-        "  goto fail",
-        ")",
-        'del /F /Q "%NEW%" >nul 2>nul',
-        commit_echo,
-        "rem Clear Mark-of-the-Web so SmartScreen/Defender is less likely to gut _MEI DLLs.",
-        unblock + " >nul 2>nul",
-        "timeout /t 2 /nobreak >nul",
-        'echo Launching "%EXE%">> "%LOG%"',
-        'start "" /D "%DIR%" "%EXE%"',
-        'del "%~f0" >nul 2>nul',
-        "exit /b 0",
-        ":fail",
-        'echo Update failed - see "%LOG%"',
-        "exit /b 1",
-        "",
-    ]
-    script.write_text("\r\n".join(lines), encoding="utf-8")
+
+    ps = f"""$ErrorActionPreference = 'Continue'
+$exe = '{exe_lit}'
+$new = '{new_lit}'
+$log = '{log_lit}'
+$dir = '{dir_lit}'
+$pidToWait = {int(pid)}
+function Log([string]$msg) {{
+  $line = "{{0}} {{1}}" -f (Get-Date -Format o), $msg
+  Add-Content -LiteralPath $log -Value $line -Encoding UTF8
+}}
+Set-Content -LiteralPath $log -Value '' -Encoding UTF8
+Log "SpecForge silent update starting (wait PID $pidToWait)"
+
+
+try {{
+  $proc = Get-Process -Id $pidToWait -ErrorAction SilentlyContinue
+  if ($proc) {{
+    Log "Waiting for process $pidToWait to exit"
+    Wait-Process -Id $pidToWait -Timeout 120 -ErrorAction SilentlyContinue
+  }}
+}} catch {{
+  Log "Wait-Process: $_"
+}}
+
+# Also wait until no SpecForge.exe image remains (covers child/restart races).
+for ($i = 0; $i -lt 90; $i++) {{
+  $alive = Get-Process -Name 'SpecForge' -ErrorAction SilentlyContinue
+  if (-not $alive) {{ break }}
+  Start-Sleep -Milliseconds 500
+}}
+Log "Process clear; settling and cleaning _MEI extract dirs"
+
+Start-Sleep -Seconds 4
+
+# Stale PyInstaller one-file unpack dirs cause: Failed to load Python DLL ... python312.dll
+Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter '_MEI*' -ErrorAction SilentlyContinue |
+  ForEach-Object {{
+    try {{
+      Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop
+      Log ("Removed " + $_.FullName)
+    }} catch {{
+      Log ("Could not remove " + $_.FullName + ": $_")
+    }}
+  }}
+
+Start-Sleep -Seconds 1
+
+if (-not (Test-Path -LiteralPath $new)) {{
+  Log "Missing downloaded file: $new"
+  exit 1
+}}
+
+for ($i = 0; $i -lt 60; $i++) {{
+  try {{
+    if (Test-Path -LiteralPath $exe) {{
+      Remove-Item -LiteralPath $exe -Force -ErrorAction Stop
+    }}
+    if (-not (Test-Path -LiteralPath $exe)) {{ break }}
+  }} catch {{
+    Start-Sleep -Milliseconds 500
+  }}
+}}
+
+try {{
+  Copy-Item -LiteralPath $new -Destination $exe -Force
+  Log "Copied new exe into place"
+}} catch {{
+  Log "Copy failed: $_"
+  exit 1
+}}
+
+Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue
+{commit_block}
+try {{ Unblock-File -LiteralPath $exe -ErrorAction SilentlyContinue }} catch {{}}
+
+# Nudge Explorer icon cache for this path (desktop shortcuts may still need recreate).
+try {{ (Get-Item -LiteralPath $exe).LastWriteTime = Get-Date }} catch {{}}
+
+Start-Sleep -Seconds 2
+Log "Launching $exe"
+$env:SPEC_FORGE_UPDATED = '1'
+Start-Process -FilePath $exe -WorkingDirectory $dir
+Log "Start-Process issued"
+# Self-delete when possible
+Start-Sleep -Seconds 1
+Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+exit 0
+"""
+    script.write_text(ps, encoding="utf-8")
     return script
+
+
+def _windows_replace_script(
+    exe_path: Path,
+    new_path: Path,
+    commit: str | None,
+    pid: int | None = None,
+) -> Path:
+    """Back-compat name used by tests; writes the silent PowerShell updater."""
+    return _windows_update_ps1(exe_path, new_path, commit, pid or os.getpid())
+
+
+def _launch_silent_updater(script: Path, cwd: Path) -> None:
+    """Run the update script with no visible console windows."""
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        raise RuntimeError("powershell was not found on PATH; cannot apply exe update silently.")
+
+    # VBScript Run(..., 0, False) never shows a console — more reliable than
+    # launching powershell.exe directly (which briefly flashes on some PCs).
+    vbs = cwd / "_specforge_update.vbs"
+    cmd = (
+        f'"{powershell}" -NoProfile -NonInteractive -ExecutionPolicy Bypass '
+        f'-WindowStyle Hidden -File "{script}"'
+    )
+    vbs_cmd = cmd.replace('"', '""')
+    vbs.write_text(
+        "\r\n".join(
+            [
+                'Set sh = CreateObject("WScript.Shell")',
+                f'sh.Run "{vbs_cmd}", 0, False',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    detached = 0x00000008
+    new_group = 0x00000200
+    flags = create_no_window | detached | new_group
+
+    wscript = shutil.which("wscript") or shutil.which("wscript.exe") or "wscript.exe"
+    subprocess.Popen(
+        [wscript, "//B", "//Nologo", str(vbs)],
+        cwd=str(cwd),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=flags,
+        close_fds=True,
+    )
 
 
 def download_and_replace_exe(
@@ -529,27 +630,20 @@ def download_and_replace_exe(
     with open(new_path, "rb+") as handle:
         handle.flush()
         try:
-            import os as _os
-
-            _os.fsync(handle.fileno())
+            os.fsync(handle.fileno())
         except OSError:
             pass
 
     verify_downloaded_exe(new_path, expected_sha256=expected_sha)
 
-    script = _windows_replace_script(exe, new_path, remote_commit)
-    # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so updater survives app exit.
-    flags = 0x00000008 | 0x00000200
-    subprocess.Popen(
-        ["cmd.exe", "/c", str(script)],
-        cwd=str(exe.parent),
-        creationflags=flags,
-        close_fds=True,
-    )
+    script = _windows_update_ps1(exe, new_path, remote_commit, os.getpid())
+    _launch_silent_updater(script, exe.parent)
     return (
         "Downloaded the latest SpecForge.exe from GitHub Releases.\n"
-        "SpecForge will close and restart with the new build.\n"
-        "If launch fails, see _specforge_update.log next to SpecForge.exe."
+        "SpecForge will close and restart quietly with the new build "
+        "(no terminal windows).\n"
+        "If launch fails, see _specforge_update.log next to SpecForge.exe, "
+        "delete %TEMP%\\_MEI* folders, and try again."
     )
 
 

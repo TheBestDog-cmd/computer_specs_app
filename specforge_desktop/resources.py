@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -23,3 +24,19 @@ def icon_ico() -> Path:
 
 def icon_png() -> Path:
     return asset_path("specforge.png")
+
+
+def ensure_sidecar_icon() -> Path | None:
+    """Copy SpecForge.ico next to the frozen exe so desktop shortcuts can see it."""
+    if not getattr(sys, "frozen", False):
+        return None
+    src = icon_ico()
+    if not src.exists():
+        return None
+    dest = Path(sys.executable).resolve().with_name("SpecForge.ico")
+    try:
+        if (not dest.exists()) or dest.stat().st_size != src.stat().st_size:
+            shutil.copy2(src, dest)
+        return dest
+    except OSError:
+        return None

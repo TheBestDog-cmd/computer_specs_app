@@ -134,9 +134,12 @@ def test_windows_replace_script_contains_settle_and_copy(tmp_path):
     new = tmp_path / "SpecForge.exe.new"
     exe.write_text("old", encoding="utf-8")
     new.write_text("new", encoding="utf-8")
-    script = updater._windows_replace_script(exe, new, "abc123")
+    script = updater._windows_replace_script(exe, new, "abc123", pid=4242)
+    assert script.suffix == ".ps1"
     body = script.read_text(encoding="utf-8")
-    assert "tasklist" in body
-    assert "copy /Y" in body
+    assert "$pidToWait = 4242" in body
+    assert "_MEI*" in body
+    assert "Copy-Item" in body
     assert "Unblock-File" in body
-    assert "timeout /t 3" in body
+    assert "Start-Process" in body
+    assert "WindowStyle" not in body  # style is on the launcher, not the script body

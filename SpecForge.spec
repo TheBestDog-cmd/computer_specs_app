@@ -48,4 +48,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['assets/specforge.ico'],
+    version='assets/version_info.txt',
 )
